@@ -2,7 +2,7 @@
 
 ## Estado
 
-Está completada la **etapa 1: entorno y estructura mínima**. Las etapas
+Están completadas las **etapas 1 y 2: entorno, modelo mecánico y cinemática**. Las etapas
 siguientes requieren autorización por separado. El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
@@ -18,7 +18,8 @@ python3.12 -m venv .venv
 .venv/bin/python -m pytest -v
 ```
 
-El punto de entrada muestra versiones y resultados en consola. No exporta datos,
+El punto de entrada muestra versiones, propiedades de las barras y posiciones de
+cuatro configuraciones en consola. No exporta datos,
 gráficos ni videos. En el IDE debe seleccionarse `.venv/bin/python` como intérprete.
 
 ## Comprobación de la etapa 1
@@ -65,10 +66,122 @@ comprobaciones. Si se ejecuta bajo la misma restricción, se puede indicar una
 ubicación escribible mediante `MPLCONFIGDIR`. Todavía no se verificaron ventanas,
 gráficos ni animaciones; corresponden a etapas posteriores.
 
-El entorno permite continuar con el modelo mecánico de la etapa 2, pendiente de
-autorización. La instalación actual y sus imports están verificados; aún no se
+El entorno permitió continuar con el modelo mecánico de la etapa 2. La
+instalación actual y sus imports están verificados; aún no se
 repitió la instalación completa desde cero usando el archivo de versiones fijadas.
 Las pruebas de esta etapa no validan la mecánica ni la dinámica del doble péndulo.
+
+## Modelo mecánico y cinemática: etapa 2
+
+`pendulo/parametros.py` define las barras mediante una estructura simple e
+inmutable `Barra`, con dimensiones y densidad en SI. Sus propiedades calculan
+masa, centro de masa y tensor central. `pendulo/modelo.py` construye el robot
+de Toolbox y entrega las posiciones de base, codo y extremo, como un array
+`(3,3)` con filas XYZ en metros. También incluye la cinemática geométrica
+independiente utilizada para contrastar los resultados.
+
+### Propiedades y referencias
+
+La orientación de la sección fue confirmada: longitud `L=0.20 m` sobre X local,
+ancho `a=0.02 m` sobre Y local y espesor `e=0.01 m` sobre Z local. La densidad
+supuestamente uniforme es `ρ=2700 kg/m³`. Cada barra tiene:
+
+\[
+m=\rho Lae=0.108\ \mathrm{kg},\qquad
+{}^i r_G=(-L/2,0,0)=(-0.10,0,0)\ \mathrm{m}.
+\]
+
+La terna DH de cada eslabón está en su extremo **distal** y X apunta desde su
+articulación proximal hacia ese extremo. Por eso el centro local tiene X negativa;
+desde la articulación proximal está a `+0.10 m`. El tensor referido al centro
+de masa, con ejes paralelos a la terna DH, es:
+
+\[
+I_G=\frac{m}{12}\operatorname{diag}(a^2+e^2,L^2+e^2,L^2+a^2)
+=\operatorname{diag}(4.5\times10^{-6},3.609\times10^{-4},3.636\times10^{-4})
+\ \mathrm{kg\,m^2}.
+\]
+
+Los productos de inercia son cero por simetría. Para comprobar la referencia,
+Steiner al extremo da `diag(4.5e-6,1.4409e-3,1.4436e-3) kg·m²`. Este tensor
+trasladado se usa únicamente en la verificación: Toolbox recibe **el tensor
+central** y el centro de masa local, evitando duplicar la traslación.
+
+### DH y geometría
+
+Las dos articulaciones son revolutas, positivas alrededor de +Z (antihorarias
+vistas desde +Z). La base coincide con el mundo y la herramienta con la terna
+del extremo; ambas transformaciones son identidad. Se usa DH estándar:
+
+| Eslabón | θ [rad] | d [m] | a [m] | α [rad] |
+|---|---|---|---|---|
+| 1 | q1 | 0 | 0.20 | 0 |
+| 2 | q2 | 0 | 0.20 | 0 |
+
+\[
+{}^{i-1}A_i=
+\begin{bmatrix}
+\cos q_i&-\sin q_i&0&L_i\cos q_i\\
+\sin q_i&\cos q_i&0&L_i\sin q_i\\
+0&0&1&0\\
+0&0&0&1
+\end{bmatrix}.
+\]
+
+Las posiciones independientes son
+`codo=(L1 cos(q1), L1 sin(q1), 0)` y
+`extremo=codo+(L2 cos(q1+q2), L2 sin(q1+q2), 0)`.
+La orientación absoluta del segundo eslabón es `q1+q2`, mientras que q2 es
+relativo al primero. La gravedad física es `(0,-9.81,0) m/s²`.
+
+El modelo actual contiene solo las barras. Se fijan explícitamente rotor,
+fricción viscosa y Coulomb a cero y relación de transmisión a uno. No se añaden
+topes: `[-π,π]` es el rango previsto de destinos, y las evaluaciones no recortan
+ángulos ni modifican el estado del robot. El plegado es admisible en este modelo
+sin colisiones, aunque represente superposición de cuerpos en una construcción.
+
+### Configuraciones verificadas
+
+La base es `(0,0,0) m` y Z=0 en todos los casos. Las coordenadas de esta tabla
+son los valores geométricos exactos; las evaluaciones numéricas de seno/coseno
+dejan residuos de hasta `2.4493e-17 m` en componentes que deben ser cero.
+Toolbox y la geometría calculada coincidieron numéricamente en los cuatro casos.
+
+| Configuración | q [rad] | Codo esperado y obtenido [m] | Extremo esperado y obtenido [m] |
+|---|---|---|---|
+| Horizontal | (0,0) | (0.20,0,0) | (0.40,0,0) |
+| Colgante | (−π/2,0) | (0,−0.20,0) | (0,−0.40,0) |
+| Invertida | (π/2,0) | (0,0.20,0) | (0,0.40,0) |
+| Plegada | (0,π) | (0.20,0,0) | (0,0,0) |
+
+### Informe de verificaciones
+
+Método reproducible: `.venv/bin/python main.py` y
+`.venv/bin/python -m pytest -v -s`. La grilla usa
+`np.linspace(-np.pi,np.pi,25)` en cada eje, incluidos ambos extremos, sin azar.
+Las comparaciones numéricas usan `rtol=0` y `atol=1e-12` en cada unidad.
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Masa: comprobar volumen y SI | Ambas barras; ρLae y valores cargados en Toolbox | 0.108 kg por barra | 0.10800000000000001 kg; diferencia 1.3877787807814457e-17 kg | Cumplida | Masa calculada con densidad supuesta; no es una medición. |
+| Centro: comprobar referencia local | Ambas barras y valores cargados en Toolbox | (−0.10,0,0) m en terna distal | Mismo vector; diferencia 0 m | Cumplida | El signo negativo responde al origen DH distal. |
+| Inercia central: comprobar orientación de sección | Ambas barras; fórmula del prisma frente a valores analíticos y Toolbox | Diagonal indicada arriba; productos cero | Diagonal indicada arriba; diferencia máxima 1.6263032587282567e-19 kg·m² | Cumplida | El tensor está referido al centro de masa y usa la sección confirmada. |
+| Steiner: comprobar referencia del tensor | Traslado al extremo usando m y r | diag(4.5e-6,1.4409e-3,1.4436e-3) kg·m² | Valores esperados; diferencia máxima 4.336808689942018e-19 kg·m² | Cumplida | Se conserva el tensor central en el modelo para evitar doble traslado. |
+| DH y unidades: comprobar construcción | Dos juntas, base/herramienta identidad, d=α=offset=0, a=0.20 m y gravedad hacia −Y | DH estándar con parámetros acordados y actuadores/fricción nulos | Todos los parámetros coinciden | Cumplida | La etapa 2 modela únicamente las barras. |
+| Cuatro posiciones: comprobar signos y plegado | Configuraciones de la tabla anterior; contraste de ambas rutas con coordenadas conocidas | Posiciones de la tabla a 1e-12 m | Error frente a valores exactos ≤2.4493e-17 m; diferencia entre rutas 0 m | Cumplida | Horizontal, colgante e invertida usan la misma convención; plegado sin colisiones. |
+| Signo y carácter relativo de q2 | q=(0,π/2) y (π/2,−π/2) | Extremo (0.20,0.20,0) m en ambos casos | Coincide dentro de 1e-12 m | Cumplida | Distingue q2 relativo de un ángulo absoluto. |
+| Cinemática en el rango | 625 pares de la grilla; base, codo y extremo por DH y geometría | Coincidencia a 1e-12 m | Diferencia máxima 1.2490009027033011e-16 m | Cumplida | Evidencia numérica reproducible dentro del rango, sin afirmar cubrir todos sus puntos. |
+| Centros globales: comprobar transformación DH | Misma grilla; Rr+t frente al punto medio de cada barra | Coincidencia a 1e-12 m | Diferencia máxima 8.3266726846886741e-17 m | Cumplida | Confirma la referencia distal y la ubicación física de ambos centros. |
+| Orientación final: comprobar suma de ángulos | Misma grilla; rotación DH frente a Rz(q1+q2) y comparación fkine/fkine_all | Diferencias ≤1e-12, adimensionales | Máxima diferencia de rotación 5.4252674220423293e-16; fkine y fkine_all coinciden | Cumplida | La composición de giros corresponde al 2R vertical acordado. |
+| Ausencia de recorte y mutaciones | q=(2π+0.3,−2π−0.2); comparación de rutas y arrays antes/después | Geometría original, q y estado del robot sin cambios | Comparación aprobada a 1e-12 m; arrays sin cambios | Cumplida | El rango de destinos no se aplica como tope de la planta. |
+| Regresión del entorno y ejecución | Dos pruebas de etapa 1 y ejecución ampliada de main.py | Diagnóstico anterior conservado; salida 0 | Ambas pruebas aprobadas; main.py finaliza con código 0 | Cumplida | Las incorporaciones no rompieron el diagnóstico inicial. |
+
+En total se ejecutaron **12 casos de prueba**, de los cuales 10 corresponden a
+esta etapa y 2 a la anterior. Los errores geométricos observados son compatibles
+con el redondeo en punto flotante y están muy por debajo de la tolerancia.
+Las verificaciones permiten continuar con la derivación dinámica de la etapa 3,
+pendiente de autorización. No se han verificado aún M, C, G del doble péndulo,
+su integración, actuadores ni control. No se modificaron las dependencias.
 
 ## Diseño aprobado para las siguientes etapas
 
@@ -125,6 +238,10 @@ Cada cierre informa **prueba y propósito, condiciones/método, resultado espera
 resultado obtenido con unidades y tolerancias, estado y análisis preliminar**.
 Si una comprobación necesaria falla, se resuelve dentro de la etapa. Cambiar diseño,
 ganancias o componentes requiere confirmación; no se avanza automáticamente.
+
+Tras completar y verificar con éxito cada etapa, se hará commit y push del
+proyecto y se actualizará y publicará su referencia como submódulo en el
+repositorio padre. Los commits incluirán únicamente los cambios de la etapa.
 
 Los módulos de parámetros, modelo, dinámica, trayectorias, control, simulación y
 visualización se crearán cuando tengan una implementación concreta. No se generan

@@ -1,17 +1,20 @@
-"""Punto de entrada inicial: diagnóstico del entorno de la etapa 1."""
+"""Punto de entrada: diagnóstico del entorno y del modelo mecánico 2R."""
+
+import numpy as np
 
 from pendulo import verificar_entorno
+from pendulo.modelo import crear_robot, posiciones_geometricas, posiciones_toolbox
+from pendulo.parametros import BARRAS
 
 
 def main() -> None:
-    """Mostrar versiones y resultados del robot auxiliar, sin guardar archivos.
+    """Mostrar versiones, robot auxiliar y modelo mecánico, sin guardar archivos.
 
-    Los resultados tienen unidades SI y corresponden al eslabón de prueba,
-    no al modelo del doble péndulo. Los errores de dependencias o de Toolbox
+    Se distinguen los resultados del eslabón auxiliar de las propiedades y
+    posiciones del doble péndulo. Los errores de dependencias o de Toolbox
     interrumpen la ejecución para que sean visibles durante el diagnóstico.
     """
-    # La etapa inicial comprueba el entorno; los escenarios del péndulo se
-    # incorporarán al punto de entrada durante sus etapas correspondientes.
+    # Conservar el diagnóstico inicial permite comprobar el entorno usado.
     resultado = verificar_entorno()
     print("Etapa 1 — Diagnóstico del entorno")
     for nombre, instalada in resultado["versiones"].items():
@@ -24,6 +27,31 @@ def main() -> None:
     print(f"Inercia articular [kg·m²]: {resultado['inercia']}")
     print(f"Gravedad [N·m]: {resultado['gravedad']}")
     print(f"Torque estático por RNE [N·m]: {resultado['torque_estatico']}")
+
+    # Las propiedades centrales de cada barra se muestran con su referencia.
+    print("\nEtapa 2 — Modelo mecánico y cinemática")
+    robot = crear_robot()
+    for indice, barra in enumerate(BARRAS, start=1):
+        print(f"Barra {indice}: masa [kg] = {barra.masa:.12g}")
+        print(f"Centro de masa en terna DH [m]: {barra.centro_masa}")
+        print(f"Tensor central [kg·m²]:\n{barra.inercia}")
+
+    # Los cuatro casos permiten revisar signos, ángulo relativo y plegado.
+    configuraciones = {
+        "Horizontal": (0.0, 0.0),
+        "Colgante": (-np.pi / 2.0, 0.0),
+        "Invertida": (np.pi / 2.0, 0.0),
+        "Plegada": (0.0, np.pi),
+    }
+    longitudes = tuple(barra.longitud for barra in BARRAS)
+    for nombre, q in configuraciones.items():
+        geometria = posiciones_geometricas(q, longitudes)
+        toolbox = posiciones_toolbox(robot, q)
+        diferencia = np.max(np.abs(toolbox - geometria))
+        print(f"{nombre}: q [rad] = {q}")
+        print(f"  Geometría, codo/extremo [m]:\n{geometria[1:]}")
+        print(f"  Toolbox, codo/extremo [m]:\n{toolbox[1:]}")
+        print(f"  Diferencia máxima [m]: {diferencia:.3e}")
 
 
 if __name__ == "__main__":
