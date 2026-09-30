@@ -56,3 +56,4 @@ def test_punto_de_entrada_desde_el_interprete_activo() -> None:
     assert "roboticstoolbox-python: 1.4.4" in proceso.stdout
     assert "Torque estático por RNE [N·m]" in proceso.stdout
     assert "Etapa 2 — Modelo mecánico y cinemática" in proceso.stdout
+    assert "Etapa 3 — Dinámica propia y contraste" in proceso.stdout

@@ -2,7 +2,8 @@
 
 ## Estado
 
-Están completadas las **etapas 1 y 2: entorno, modelo mecánico y cinemática**. Las etapas
+Están completadas las **etapas 1, 2 y 3: entorno, modelo mecánico, cinemática
+y dinámica propia contrastada**. Las etapas
 siguientes requieren autorización por separado. El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
@@ -18,8 +19,8 @@ python3.12 -m venv .venv
 .venv/bin/python -m pytest -v
 ```
 
-El punto de entrada muestra versiones, propiedades de las barras y posiciones de
-cuatro configuraciones en consola. No exporta datos,
+El punto de entrada muestra versiones, propiedades de las barras, posiciones de
+cuatro configuraciones y contraste de la dinámica en consola. No exporta datos,
 gráficos ni videos. En el IDE debe seleccionarse `.venv/bin/python` como intérprete.
 
 ## Comprobación de la etapa 1
@@ -179,9 +180,164 @@ Las comparaciones numéricas usan `rtol=0` y `atol=1e-12` en cada unidad.
 En total se ejecutaron **12 casos de prueba**, de los cuales 10 corresponden a
 esta etapa y 2 a la anterior. Los errores geométricos observados son compatibles
 con el redondeo en punto flotante y están muy por debajo de la tolerancia.
-Las verificaciones permiten continuar con la derivación dinámica de la etapa 3,
-pendiente de autorización. No se han verificado aún M, C, G del doble péndulo,
-su integración, actuadores ni control. No se modificaron las dependencias.
+Estas verificaciones corresponden al modelo mecánico y la cinemática; el
+contraste de M, C y G se documenta en la sección siguiente. No se modificaron
+las dependencias.
+
+## Dinámica propia y contraste: etapa 3
+
+`pendulo/dinamica.py` implementa `Dinamica(robot)` para el modelo 2R de barras.
+Lee los parámetros del robot construido en la etapa 2, pero no llama a sus
+operaciones dinámicas para obtener las expresiones propias. Las transformaciones,
+pseudoinercias, M, C, G, Ṁ y potencial simbólicos quedan disponibles para revisar.
+La construcción deriva una vez y prepara evaluadores NumPy con `lambdify`;
+se utiliza la misma instancia para todas las evaluaciones de ese modelo.
+
+Los parámetros se convierten de su representación decimal a racionales de
+SymPy, conservando incluso los residuos de los floats del modelo. Esto permite
+comprobar identidades algebraicas sin introducir redondeos simbólicos sucesivos;
+no convierte supuestos físicos en valores exactos. Los métodos `M`, `C`, `G`,
+`M_punto`, `potencial` e `inversa` retornan arrays o escalares numéricos en SI.
+Si se cambia un parámetro del robot, debe construirse otra instancia de dinámica.
+
+### Ecuaciones implementadas
+
+Sea `I_G` el tensor central, `r` el centro en la terna DH distal y `m` la masa.
+La pseudoinercia usa los segundos momentos respecto de esa terna:
+
+\[
+S=\tfrac12\operatorname{tr}(I_G)\,I_3-I_G+mrr^T,\qquad
+J=\begin{bmatrix}S&mr\\mr^T&m\end{bmatrix}.
+\]
+
+El bloque superior de J se expresa en kg·m², los primeros momentos en kg·m
+y la esquina inferior en kg. Para ambas barras, los valores nominales son:
+
+\[
+J=\begin{bmatrix}
+0.00144&0&0&-0.0108\\
+0&0.0000036&0&0\\
+0&0&0.0000009&0\\
+-0.0108&0&0&0.108
+\end{bmatrix}.
+\]
+
+Se acumulan `A0_i` a partir del DH y se aplican las ecuaciones de la cursada:
+
+\[
+M_{sk}=\sum_{i=1}^{2}\operatorname{tr}
+\left[\frac{\partial A_0^i}{\partial q_s}J_i
+\left(\frac{\partial A_0^i}{\partial q_k}\right)^T\right],
+\]
+\[
+C_{sj}=\sum_{k=1}^{2}\frac12\left[
+\frac{\partial M_{sj}}{\partial q_k}
++\frac{\partial M_{sk}}{\partial q_j}
+-\frac{\partial M_{jk}}{\partial q_s}\right]\dot q_k.
+\]
+
+Para hacer compatibles las dimensiones homogéneas, se definen
+`g_h=(0,-9.81,0,0)` y `r_G_h=(r_x,r_y,r_z,1)`. Entonces:
+
+\[
+G_s=-\sum_{i=1}^{2}m_i g_h^T
+\frac{\partial A_0^i}{\partial q_s}r_{G,h}^i,\qquad
+U=-\sum_{i=1}^{2}m_i g_h^T A_0^i r_{G,h}^i.
+\]
+
+G se obtiene directamente con la primera fórmula y luego se verifica
+`G=grad(U)`. Se calcula también `Ṁ=sum_k (∂M/∂q_k) q̇_k`. Las fórmulas de M,
+C y G copiadas en el planteo resultaron coherentes con este contraste, usando
+las referencias y los vectores homogéneos definidos aquí.
+
+Para los parámetros nominales, los coeficientes redondeados a las cifras
+mostradas dan:
+
+\[
+M=\begin{bmatrix}
+0.0072072+0.00432\cos q_2&0.0014436+0.00216\cos q_2\\
+0.0014436+0.00216\cos q_2&0.0014436
+\end{bmatrix}\ \mathrm{kg\,m^2},
+\]
+\[
+C=0.00216\sin q_2\begin{bmatrix}
+-\dot q_2&-(\dot q_1+\dot q_2)\\\dot q_1&0
+\end{bmatrix},
+\qquad
+G=\begin{bmatrix}
+0.317844\cos q_1+0.105948\cos(q_1+q_2)\\
+0.105948\cos(q_1+q_2)
+\end{bmatrix}\ \mathrm{N\,m}.
+\]
+
+C tiene unidades kg·m²/s y `C q̇` tiene unidades N·m. La energía potencial es
+`U=0.317844 sin(q1)+0.105948 sin(q1+q2)` J, con referencia cero cuando Y=0.
+La dinámica inversa es `τ=M q̈+C q̇+G`, sin actuadores ni fricción en esta etapa.
+
+### Condiciones reproducibles
+
+Ejecutar `.venv/bin/python -m pytest -v -s` muestra las diferencias medidas.
+El contraste usa nueve ángulos equiespaciados en `[-π,π]` por eje, con estos
+cuatro perfiles de velocidad/aceleración para cada par: **324 estados**.
+
+| q̇ [rad/s] | q̈ [rad/s²] |
+|---|---|
+| (0,0) | (0,0) |
+| (1.2,−0.7) | (2,−1) |
+| (−2,1.5) | (−6,4) |
+| (3,−3) | (6,−6) |
+
+El chequeo de positividad usa 25 ángulos por eje, **625 pares**. Los extremos
+están incluidos en ambas grillas y no se usa azar. Las tolerancias son absolutas
+(`rtol=0`): 1e-12 para comparaciones directas, 1e-10 kg·m²/s para diferencias
+finitas de Ṁ y 1e-9 N·m para el gradiente numérico del potencial.
+
+### Informe de verificaciones
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Pseudoinercia: comprobar referencia DH | Ambas barras; J frente a integrales de un prisma con X en [−L,0] y sección centrada | Matriz nominal indicada arriba, diferencia ≤1e-12 en unidades de cada bloque | Ambas matrices coinciden dentro de la tolerancia | Cumplida | Los momentos incluyen correctamente la traslación del centro al origen distal. |
+| M: contrastar inercia con Toolbox | 324 estados; trazas frente a `robot.inertia(q)` | Diferencia ≤1e-12 kg·m² | Máxima 1.734723475976807e-18 kg·m² | Cumplida | Las dos formulaciones representan la misma inercia de las barras en los casos probados. |
+| G: contrastar gravedad con Toolbox | 324 estados; fórmula homogénea frente a `robot.gravload(q)` | Diferencia ≤1e-12 N·m | Máxima 1.6653345369377348e-16 N·m | Cumplida | Confirma signo y referencias del torque gravitatorio. |
+| Cq̇: contrastar torque por velocidad | 324 estados; Christoffel frente a `robot.coriolis(q,qd) @ qd` | Diferencia ≤1e-12 N·m, sin exigir matrices C idénticas | Máxima 1.3877787807814457e-17 N·m | Cumplida | Coinciden los torques centrífugos y de Coriolis. |
+| Inversa: contrastar torque completo | 324 estados; Mq̈+Cq̇+G frente a `robot.rne(q,qd,qdd)` | Diferencia ≤1e-12 N·m | Máxima 1.6653345369377348e-16 N·m | Cumplida | Incluye reposo, ambos signos y términos de aceleración. |
+| Simetría de M: comprobar energía cinética | Residuo simbólico M−Mᵀ y grilla de 625 pares | Cero simbólico; residuo numérico ≤1e-12 kg·m² | Cero simbólico y máximo numérico 0 kg·m² | Cumplida | M es coherente con una forma cuadrática de energía. |
+| Positividad de M: comprobar masas efectivas | Autovalores con `eigvalsh` en 625 pares | Todos estrictamente positivos | Menor observado 0.00028816834384900558 kg·m² | Cumplida | No hubo singularidad dinámica en la grilla; no demuestra todo estado posible. |
+| Ṁ: contrastar derivada direccional | 324 estados; derivada simbólica frente a [M(q+hq̇)−M(q−hq̇)]/(2h), h=1e-6 s | Diferencia ≤1e-10 kg·m²/s | Máxima 8.7786028446501518e-13 kg·m²/s | Cumplida | La derivada numérica respalda la simbólica dentro del error de diferencias finitas. |
+| Ṁ−2C: comprobar antisimetría | Parte simétrica simbólica y 324 estados numéricos | Cero simbólico y residuo ≤1e-12 kg·m²/s | Cero simbólico; máximo numérico 8.6736173798840355e-19 kg·m²/s | Cumplida | Se cumple la identidad estructural de la C elegida. |
+| Potencia de la matriz antisimétrica | q̇ᵀ(Ṁ−2C)q̇ en 324 estados | Magnitud ≤1e-12 W | Máxima 1.7347234759768071e-18 W | Cumplida | No introduce potencia neta, dentro del redondeo numérico. |
+| G=grad(U): comprobar identidad simbólica | Diferencia entre G por fórmula y derivadas de U | Vector cero simbólico | Cero en ambas componentes | Cumplida | El signo del potencial y el de los torques son coherentes. |
+| Potencial: contrastar alturas geométricas | 81 posiciones; U simbólica frente a centros como puntos medios, sin usar A simbólicas | Diferencia ≤1e-12 J | Máxima 1.1102230246251565e-16 J | Cumplida | Verifica U con una cuenta geométrica independiente. |
+| Gradiente numérico: contrastar torque | Mismas 81 posiciones; diferencias centrales del potencial geométrico, h=1e-6 rad | Diferencia con G ≤1e-9 N·m | Máxima 8.9530605151821874e-11 N·m | Cumplida | Diferencia compatible con truncamiento y redondeo al diferenciar numéricamente. |
+| Sostén y potencial conocidos | Cinco configuraciones de la tabla siguiente; G, inversa propia y RNE en reposo | Torques manuales a 1e-12 N·m y potencial a 1e-12 J | Todas las comparaciones cumplen; valores indicados abajo | Cumplida | Las configuraciones verticales requieren torque cero, pero tienen distinto potencial. |
+| Derivar una vez: comprobar evaluación | Interceptar `MatrixBase.diff` después de construir; evaluar M, C, G, Ṁ, U e inversa | Ninguna nueva diferenciación y resultados finitos | Sin llamadas de diferenciación; todos los resultados finitos | Cumplida | Las evaluaciones usan las funciones NumPy preparadas. |
+| Regresión y entrada | Suite completa y `main.py` desde `.venv` | Pruebas previas preservadas; ejecución sin error | 24 casos aprobados (12 nuevos y 12 previos); salida 0 | Cumplida | La etapa 3 conserva el funcionamiento anterior. |
+
+Los torques de sostén calculados manualmente y observados son:
+
+| Configuración | q [rad] | τ esperado [N·m] | τ obtenido [N·m], redondeado | U esperado/obtenido [J], redondeado |
+|---|---|---|---|---|
+| Horizontal | (0,0) | (0.423792,0.105948) | (0.423792,0.105948) | 0 / 0 |
+| Colgante | (−π/2,0) | (0,0) | (2.59498e-17,6.48744e-18) | −0.423792 / −0.423792 |
+| Invertida | (π/2,0) | (0,0) | (2.59498e-17,6.48744e-18) | +0.423792 / +0.423792 |
+| Plegada | (0,π) | (0.211896,−0.105948) | (0.211896,−0.105948) | 0 / 1.29749e-17 |
+| Hacia izquierda | (π,0) | (−0.423792,−0.105948) | (−0.423792,−0.105948) | 0 / 5.18996e-17 |
+
+Por ejemplo, en horizontal los brazos de los centros son 0.10 y 0.30 m para
+el eje 1 y 0.10 m para el eje 2: `τ1=0.108·9.81·(0.10+0.30)` y
+`τ2=0.108·9.81·0.10`. En el estado no estático mostrado por `main.py`,
+`q=(0.4,−0.7)` rad, `q̇=(1.2,−0.8)` rad/s y `q̈=(2,−1)` rad/s², ambas
+rutas dan aproximadamente `(0.41011555,0.10395993)` N·m; la diferencia
+numérica observada en ese estado fue 0 N·m.
+
+La evidencia respalda la dinámica propia del modelo actual, tanto por contraste
+con Newton-Euler de Toolbox como por identidades simbólicas y cuentas
+independientes de equilibrio y energía. No se detectaron discrepancias que
+requieran cambiar el diseño. Los errores de diferencias finitas son mayores
+que los del contraste directo, pero cumplen sus tolerancias específicas.
+La integración, conservación de energía durante movimiento y animación se
+verificarán en la **etapa 4, pendiente de autorización**. Esta etapa aún no incluye
+montaje, inercia de rotores ni fricción. No se modificaron las dependencias.
 
 ## Diseño aprobado para las siguientes etapas
 
