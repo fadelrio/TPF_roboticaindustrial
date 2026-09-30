@@ -1,0 +1,20 @@
+# Entorno virtual y configuración local del editor.
+.venv/
+.idea/
+.vscode/
+
+# Cachés y archivos generados por Python y las herramientas de desarrollo.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Empaquetado y archivos temporales locales.
+build/
+dist/
+*.egg-info/
+*.log
+.DS_Store
