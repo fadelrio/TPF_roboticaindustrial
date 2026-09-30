@@ -2,8 +2,8 @@
 
 ## Estado
 
-Están completadas las **etapas 1, 2 y 3: entorno, modelo mecánico, cinemática
-y dinámica propia contrastada**. Las etapas
+Están completadas las **etapas 1 a 4: entorno, modelo mecánico, cinemática,
+dinámica propia y movimiento libre con gráficos y animación**. Las etapas
 siguientes requieren autorización por separado. El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
@@ -16,12 +16,23 @@ entorno con las dependencias fijadas en `requirements.txt`:
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python main.py
+.venv/bin/python main.py --caso invertido
+.venv/bin/python main.py --caso colgante --sin-graficos
 .venv/bin/python -m pytest -v
 ```
 
 El punto de entrada muestra versiones, propiedades de las barras, posiciones de
-cuatro configuraciones y contraste de la dinámica en consola. No exporta datos,
-gráficos ni videos. En el IDE debe seleccionarse `.venv/bin/python` como intérprete.
+cuatro configuraciones y contraste de la dinámica en consola. Después simula
+el escenario elegido y muestra gráficos y animación en ventanas; por defecto
+ejecuta `oscilacion`. `--sin-graficos` omite las figuras y la espera de ventanas.
+No exporta datos, gráficos ni videos. En el IDE debe seleccionarse
+`.venv/bin/python` como intérprete. Para terminar la ejecución gráfica, cerrar
+ambas ventanas.
+
+Si Matplotlib selecciona `Agg`, solo dispone de renderizado sin ventanas. Se
+verificó también `TkAgg` en el escritorio; puede elegirse explícitamente con
+`MPLBACKEND=TkAgg .venv/bin/python main.py --caso oscilacion`, siempre que el
+entorno tenga Tk y acceso a la pantalla.
 
 ## Comprobación de la etapa 1
 
@@ -64,8 +75,8 @@ de este caso, no constituyen una garantía general de exactitud.
 La restricción de escritura en la configuración del usuario hace que Matplotlib
 use una caché temporal en `/tmp`, con un aviso al importar. Esto no impidió las
 comprobaciones. Si se ejecuta bajo la misma restricción, se puede indicar una
-ubicación escribible mediante `MPLCONFIGDIR`. Todavía no se verificaron ventanas,
-gráficos ni animaciones; corresponden a etapas posteriores.
+ubicación escribible mediante `MPLCONFIGDIR`. Las verificaciones de ventanas,
+gráficos y animaciones se documentan en la etapa 4.
 
 El entorno permitió continuar con el modelo mecánico de la etapa 2. La
 instalación actual y sus imports están verificados; aún no se
@@ -336,8 +347,141 @@ independientes de equilibrio y energía. No se detectaron discrepancias que
 requieran cambiar el diseño. Los errores de diferencias finitas son mayores
 que los del contraste directo, pero cumplen sus tolerancias específicas.
 La integración, conservación de energía durante movimiento y animación se
-verificarán en la **etapa 4, pendiente de autorización**. Esta etapa aún no incluye
-montaje, inercia de rotores ni fricción. No se modificaron las dependencias.
+documentan en la etapa 4. La dinámica de esta etapa aún no incluye montaje,
+inercia de rotores ni fricción. No se modificaron las dependencias.
+
+## Movimiento libre, integración y visualización: etapa 4
+
+`pendulo/simulacion.py` integra el modelo sin torque ni fricción, usando la
+instancia de dinámica ya derivada. Con estado `x=(q1,q2,qd1,qd2)`:
+
+\[
+\dot x=\begin{bmatrix}\dot q\\
+M(q)^{-1}\big[-C(q,\dot q)\dot q-G(q)\big]\end{bmatrix}.
+\]
+
+En el código se resuelve el sistema con `np.linalg.solve`, sin formar M inversa.
+Se usa `solve_ivp`, método RK45, `rtol=1e-7`, `atol=1e-9` y `t_eval` con salida
+cada 1 ms. RK45 conserva sus pasos internos adaptativos: la grilla de salida
+no obliga a integrar a paso fijo. Se incluye la muestra final; si la duración
+no es múltiplo de 1 ms, el último intervalo de salida es más corto.
+
+`ResultadoSimulacion` conserva tiempos, q, qd, energías cinética y potencial y
+cantidad de evaluaciones de la ecuación diferencial. No se aplican topes ni
+envoltura de ángulos. En cada muestra se calcula:
+
+\[
+K=\tfrac12\dot q^T M(q)\dot q,\qquad E=K+U.
+\]
+
+Como no hay trabajo externo ni fricción, la solución continua debe conservar E.
+La variación numérica `E(t)−E(0)` permite evaluar la integración, sin confundirla
+con pérdidas físicas. Las energías se calculan en la misma grilla que los estados.
+
+### Escenarios y condiciones reproducibles
+
+Los tres casos se definen en `main.py`; se puede elegir cualquiera con `--caso`:
+
+| Caso | q0 [rad] | qd0 [rad/s] | Duración [s] | Muestras |
+|---|---|---|---|---|
+| colgante | (−π/2,0) | (0,0) | 5 | 5001 |
+| invertido | (π/2+π/180,0) | (0,0) | 2 | 2001 |
+| oscilacion | (−π/2+0.3,−0.2) | (0.4,−0.1) | 5 | 5001 |
+
+La perturbación del invertido es explícitamente **1° en q1**, con q2 y
+velocidades iniciales nulos. No se usa ruido para iniciar el movimiento.
+El caso de oscilación tiene desviaciones y velocidades pequeñas alrededor del
+colgante. La convergencia repite invertido y oscilación con `rtol=1e-9` y
+`atol=1e-11`, manteniendo planta, estado inicial, duración y grilla de salida.
+
+Reproducción de los informes:
+
+```bash
+.venv/bin/python -m pytest tests/test_simulacion.py tests/test_visualizacion.py -v -s
+.venv/bin/python main.py --caso invertido --sin-graficos
+.venv/bin/python -m pytest -v -s
+```
+
+Los criterios de esta etapa son verificaciones numéricas: posición del colgante
+dentro de 1e-7 rad y velocidad dentro de 1e-6 rad/s; conservación de E dentro
+de 1e-5 J; diferencias nominal/estricta dentro de 1e-4 rad y 1e-3 rad/s;
+y menor variación de energía con tolerancias estrictas. No son especificaciones
+de seguimiento de un controlador.
+
+### Resultados de energía y convergencia
+
+Las diferencias de estado son máximos por componente sobre todas las muestras,
+sin envolver ángulos. Las variaciones de energía son `max(abs(E−E(0)))`.
+
+| Caso | E inicial [J] | Variación de E nominal [J] | Variación de E estricta [J] | Diferencia q [rad] | Diferencia qd [rad/s] | Evaluaciones nominal/estricta |
+|---|---|---|---|---|---|---|
+| invertido | +0.42372745442571741 | 1.1994816722094015e-6 | 2.1532620297914917e-8 | 1.290201413262082e-5 | 2.9285636298226336e-4 | 2318 / 4988 |
+| oscilacion | −0.408286589095539 | 8.6059217530021215e-9 | 8.5373985658776519e-11 | 1.0396894883218932e-6 | 1.621961817033224e-5 | 4082 / 9266 |
+
+El colgante tiene E inicial `−0.42379200000000006 J` y variación de E observada
+de 0 J a la resolución de los floats. Su desviación máxima fue
+`3.5371651189042709e-9 rad` y su velocidad máxima `5.6230911325590502e-8 rad/s`.
+No se sustituyó el torque gravitatorio por cero: los residuos de `cos(−π/2)`
+y la tolerancia absoluta del integrador producen una evolución diminuta.
+La energía no resuelve esa variación de estado, cuyo efecto es de segundo orden.
+
+El invertido perturbado alcanza un alejamiento máximo de q1 respecto de π/2
+de `7.7943627366525021 rad`. Al terminar los 2 s, q es aproximadamente
+`(9.36515906,9.43315930) rad`. La salida incluye vueltas completas: el rango de
+destinos `[-π,π]` no se impone como límite físico. La caída y las rotaciones
+son compatibles con la transformación de potencial en energía cinética;
+la deriva energética pequeña y decreciente al ajustar tolerancias es numérica.
+
+### Gráficos y animación
+
+`pendulo/visualizacion.py` crea cuatro paneles: q, qd, K/U/E y E−E(0).
+Las ocho curvas usan los tiempos y valores originales. La animación 2D
+representa base, codo y extremo en XY, con escala igual en ambos ejes y
+tiempo físico rotulado. Las longitudes se toman del modelo en `main.py`.
+
+La reproducción solicita un fotograma cada 20 ms, **50 fotogramas/s nominales**,
+seleccionando la primera muestra disponible para cada tiempo objetivo e
+incluyendo siempre la muestra final. Con salida de 1 ms y duración múltiplo de
+20 ms, se usa una de cada 20 muestras. Si queda un tramo final más corto, se
+incluye su extremo en el siguiente cuadro. El temporizador del backend puede
+retrasarse; no garantiza sincronización exacta con el reloj del sistema.
+La animación no reintegra ni cambia los resultados y no se repite automáticamente.
+
+Se verificaron el renderizado de la figura completa y un fotograma del invertido
+en t=1 s, usando imágenes en memoria. No se guardaron gráficos ni videos.
+También se abrieron y cerraron ventanas `TkAgg` en una prueba breve: para una
+simulación de 0.105 s, el temporizador real alcanzó el rótulo `t = 0.105 s`.
+Esto confirma el avance interactivo en este escritorio, sin medir su precisión
+temporal ni garantizar el mismo backend en otro equipo.
+
+### Informe de verificaciones
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Colgante: comprobar equilibrio | Estado exacto colgante en reposo, 5 s, tolerancias nominales | Desviación ≤1e-7 rad; velocidad ≤1e-6 rad/s | Máximos 3.5371651189042709e-9 rad y 5.6230911325590502e-8 rad/s | Cumplida | Permanece cerca del equilibrio sin corregir artificialmente el estado. |
+| Invertido: comprobar inestabilidad | Desviación inicial de q1 de 1°, q2=0, reposo, 2 s | Alejamiento de q1 >10° del invertido | Máximo 7.7943627366525021 rad | Cumplida | La perturbación explícita inicia un alejamiento físico importante. |
+| Ausencia de topes ficticios | Mismo caso invertido; revisar q sobre todo el recorrido | Se conserva la evolución aunque salga de [-π,π] | q final ≈(9.36515906,9.43315930) rad y recorrido fuera del rango | Cumplida | Los ángulos de la planta no fueron recortados ni envueltos. |
+| Conservación de energía: invertido | 2 s, torque y fricción nulos; calcular K+U por muestra | Variación máxima ≤1e-5 J | Nominal 1.1994816722094015e-6 J; estricta 2.1532620297914917e-8 J | Cumplida | La deriva disminuye con mayor precisión; no representa pérdidas físicas. |
+| Conservación de energía: oscilación | 5 s, torque y fricción nulos; calcular K+U por muestra | Variación máxima ≤1e-5 J | Nominal 8.6059217530021215e-9 J; estricta 8.5373985658776519e-11 J | Cumplida | La energía mecánica permanece constante dentro del error numérico observado. |
+| Convergencia: invertido | Misma salida de 1 ms, rtol/atol cien veces menores | Diferencias ≤1e-4 rad y ≤1e-3 rad/s, menor deriva de E | 1.290201413262082e-5 rad; 2.9285636298226336e-4 rad/s; deriva menor | Cumplida | La referencia más precisa respalda el recorrido en este horizonte de 2 s. |
+| Convergencia: oscilación | Misma salida de 1 ms, rtol/atol cien veces menores | Diferencias ≤1e-4 rad y ≤1e-3 rad/s, menor deriva de E | 1.0396894883218932e-6 rad; 1.621961817033224e-5 rad/s; deriva menor | Cumplida | Coincidencia consistente con las tolerancias de integración. |
+| Tiempos y estados | Tres escenarios; extremos, formas, valores finitos y condiciones iniciales | 5001/2001/5001 muestras; paso 1 ms a 1e-15 s; estado inicial exacto | Todas las comprobaciones cumplen; energías y estados comparten la grilla | Cumplida | Los resultados tienen correspondencia temporal explícita. |
+| Duración no múltiplo de paso | Duración 2.5 ms y paso 1 ms | t=(0,0.001,0.002,0.0025) s | Vector exactamente coincidente | Cumplida | Se conserva la duración final con último intervalo corto. |
+| Curvas: comprobar correspondencia | Ocho curvas de un caso de 0.105 s frente a arrays originales | Abscisas y ordenadas idénticas, lienzo renderizable | Igualdad exacta de datos; render Agg completo | Cumplida | Los gráficos muestran el resultado calculado sin otro remuestreo. |
+| Fotogramas y tiempo | Caso de 0.105 s; avanzar los cuadros de FuncAnimation en Agg y comparar con DH | Índices 0,20,40,60,80,100,105; geometría a 1e-12 m; rótulo correcto y finalización | Secuencia esperada; todas las comparaciones cumplen; rótulo final 0.105 s; timer configurado a 20 ms | Cumplida | Los fotogramas usan los mismos estados que las curvas y llegan al final. |
+| Inspección visual | Render en memoria de oscilación 5 s y cuadro invertido t=1 s | Ejes/unidades/leyendas legibles; geometría y tiempo reconocibles | Figuras revisadas sin recortes de texto ni exportaciones | Cumplida | Se ve la oscilación, el intercambio K/U y la deriva numérica por separado. |
+| Ventanas y temporizador real | TkAgg; mostrar gráficos y animación de 0.105 s, procesar eventos durante 1 s y cerrar ventanas | Ventanas creadas y animación llega al final | Backend TkAgg; rótulo final `t = 0.105 s`; código de salida 0 | Cumplida | Funciona en este escritorio; no verifica reproducción con precisión de reloj. |
+| Entrada y regresión | Suite completa y main.py con --sin-graficos | Etapas previas preservadas, salida sin error | 32 casos aprobados (8 nuevos y 24 previos); main.py finaliza con código 0 | Cumplida | La integración y visualización no rompieron las verificaciones anteriores. |
+
+La etapa aporta evidencia de que la integración reproduce equilibrios y
+movimiento libre de la planta acordada. Las rotaciones del invertido no son
+producto de un recorte ni una perturbación numérica inadvertida. La conservación
+de energía y el contraste con tolerancias estrictas respaldan los recorridos
+en los horizontes examinados; la referencia estricta tampoco es una solución
+exacta y no se extrapola esta convergencia a tiempos arbitrarios.
+No se modificaron RK45, las tolerancias nominales ni las dependencias.
+Los escenarios aún no incluyen actuadores, fricción ni control. La
+**etapa 5 —actuadores, montaje y rozamiento— queda pendiente de autorización**.
 
 ## Diseño aprobado para las siguientes etapas
 

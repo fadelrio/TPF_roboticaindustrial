@@ -45,7 +45,7 @@ def test_punto_de_entrada_desde_el_interprete_activo() -> None:
     # La ejecución independiente detecta errores de imports y del punto de
     # entrada que podrían quedar ocultos al invocar solo una función importada.
     proceso = subprocess.run(
-        [sys.executable, "main.py"],
+        [sys.executable, "main.py", "--sin-graficos"],
         cwd=raiz,
         capture_output=True,
         text=True,
@@ -57,3 +57,4 @@ def test_punto_de_entrada_desde_el_interprete_activo() -> None:
     assert "Torque estático por RNE [N·m]" in proceso.stdout
     assert "Etapa 2 — Modelo mecánico y cinemática" in proceso.stdout
     assert "Etapa 3 — Dinámica propia y contraste" in proceso.stdout
+    assert "Etapa 4 — Movimiento libre e integración" in proceso.stdout
