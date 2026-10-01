@@ -29,6 +29,10 @@ No exporta datos, gráficos ni videos. En el IDE debe seleccionarse
 `.venv/bin/python` como intérprete. Para terminar la ejecución gráfica, cerrar
 ambas ventanas.
 
+La ventana de animación incluye **«Volver a reproducir»**. Se puede pulsar
+durante el movimiento o al terminar para reiniciar desde t=0, usando los
+resultados calculados, sin volver a ejecutar el programa.
+
 Si Matplotlib selecciona `Agg`, solo dispone de renderizado sin ventanas. Se
 verificó también `TkAgg` en el escritorio; puede elegirse explícitamente con
 `MPLBACKEND=TkAgg .venv/bin/python main.py --caso oscilacion`, siempre que el
@@ -446,6 +450,9 @@ incluyendo siempre la muestra final. Con salida de 1 ms y duración múltiplo de
 incluye su extremo en el siguiente cuadro. El temporizador del backend puede
 retrasarse; no garantiza sincronización exacta con el reloj del sistema.
 La animación no reintegra ni cambia los resultados y no se repite automáticamente.
+Para verla nuevamente, pulsar **«Volver a reproducir»** debajo del gráfico.
+La primera reproducción empieza automáticamente; cada reinicio vuelve a t=0
+y se detiene en el último fotograma.
 
 Se verificaron el renderizado de la figura completa y un fotograma del invertido
 en t=1 s, usando imágenes en memoria. No se guardaron gráficos ni videos.
@@ -482,6 +489,33 @@ exacta y no se extrapola esta convergencia a tiempos arbitrarios.
 No se modificaron RK45, las tolerancias nominales ni las dependencias.
 Los escenarios aún no incluyen actuadores, fricción ni control. La
 **etapa 5 —actuadores, montaje y rozamiento— queda pendiente de autorización**.
+
+### Reproducción manual añadida a la etapa 4
+
+El botón detiene el temporizador anterior, si todavía existe, y crea una nueva
+`FuncAnimation` sobre los mismos artistas, resultados e índices. Dibuja la muestra
+inicial e inicia el nuevo reproductor. El retorno de `crear_animacion` sigue
+siendo `(figura, animacion)`; la animación retornada es la primera. La figura
+conserva el botón y el reproductor vigente en su registro privado
+`_reproduccion`, para mantener las referencias después de retornar la función.
+El botón permanece disponible al finalizar y puede usarse sucesivamente.
+
+Verificaciones reproducibles con
+`.venv/bin/python -m pytest tests/test_visualizacion.py -v`:
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Reinicio durante reproducción | Recorrido de 0.105 s; avanzar dos fotogramas y emitir press/release sobre el botón | Detener timer anterior, crear otro y mostrar t=0 | Una llamada a stop; timer distinto; tiempo 0.000 s y geometría inicial correcta | Cumplida | No queda el reproductor anterior avanzando en paralelo. |
+| Reinicio después del final | Completar la secuencia hasta que Matplotlib elimina event_source; pulsar el botón | Nuevo reproductor operativo desde t=0 | Reinicio correcto con el timer anterior ya ausente | Cumplida | No depende de reutilizar un temporizador terminado. |
+| Dos repeticiones consecutivas | Después de cada condición anterior, completar dos ciclos reiniciados | Índices 0,20,40,60,80,100,105; geometría DH a 1e-12 m; tiempos correctos y finalización | Todas las comparaciones cumplen; cada ciclo termina en 0.105 s | Cumplida | El botón sigue funcionando después de cada reproducción. |
+| Ausencia de reintegración y mutaciones | Interceptar solve_ivp para que cualquier llamada falle; comparar t,q,qd,K,U y evaluaciones antes/después | Ninguna llamada al integrador; arrays y contador idénticos | Sin llamadas; igualdad exacta en todos los campos comprobados | Cumplida | Las repeticiones solo redibujan resultados en memoria. |
+| Presentación del botón | Render inicial en Agg, inspeccionado como imagen en memoria | Texto legible, control debajo del gráfico y ejes sin superposición | Botón y gráfico legibles, sin exportaciones | Cumplida | La franja inferior permite operar sin tapar la geometría ni los ejes. |
+| Ventana y temporizador real | TkAgg, recorrido de 0.505 s; pulsar con movimiento visible y repetir dos veces después del final | Reinicio inmediato a t=0 y llegada al final en cada ciclo | Primer clic en t=0.020 s; reinicios a 0.000 s; ambos ciclos posteriores terminan en 0.505 s | Cumplida | Se comprobó el widget en una ventana real, sin exigir precisión de reloj al timer. |
+| Regresión | Suite completa con las dos condiciones nuevas parametrizadas | Verificaciones previas preservadas | 34 casos aprobados, incluidos los 32 previos | Cumplida | La reproducción manual conserva las comprobaciones del modelo y de la integración. |
+
+La mejora permite revisar el movimiento varias veces en la misma ventana.
+No cambió las condiciones de simulación, la selección de fotogramas ni la
+repetición automática desactivada. No se añadieron dependencias.
 
 ## Diseño aprobado para las siguientes etapas
 

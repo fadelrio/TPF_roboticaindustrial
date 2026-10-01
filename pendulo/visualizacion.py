@@ -6,6 +6,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.text import Text
+from matplotlib.widgets import Button
 
 from .modelo import posiciones_geometricas
 from .simulacion import ResultadoSimulacion
@@ -67,13 +68,16 @@ def crear_animacion(
     longitudes: tuple[float, float] = (0.20, 0.20),
     periodo: float = 0.020,
 ) -> tuple[Figure, FuncAnimation]:
-    """Crear animación 2D y retornar figura y objeto que debe mantenerse vivo.
+    """Crear animación 2D con botón para volver a reproducir los mismos datos.
 
     ``periodo`` está en s y vale 20 ms (50 fotogramas/s nominales) por defecto;
     se selecciona la primera muestra disponible para cada tiempo de reproducción
     y se incluye el final. Las longitudes están en m. La salida acordada de
     1 ms permite seleccionar cuadros cada 20 ms sin reintegrar. El temporizador
     gráfico depende del backend y no garantiza reproducción en tiempo real.
+    Retorna la figura y la primera animación. La figura conserva el botón y
+    la animación vigente en su registro privado ``_reproduccion``; pulsar el
+    botón sustituye el reproductor y vuelve a t=0 sin integrar nuevamente.
     """
     if periodo <= 0:
         raise ValueError("El período de animación debe ser positivo")
@@ -90,9 +94,44 @@ def crear_animacion(
     objetivos = np.arange(0.0, resultado.t[-1], periodo)
     indices = np.unique(np.append(np.searchsorted(resultado.t, objetivos), len(resultado.t) - 1))
     actualizar_animacion(0, resultado, linea, texto, longitudes)
-    animacion = FuncAnimation(figura, actualizar_animacion, frames=indices,
+
+    def nueva_animacion() -> FuncAnimation:
+        """Crear un reproductor desde el primer índice sobre los artistas existentes."""
+        # Cada FuncAnimation recibe una nueva secuencia de los mismos índices;
+        # no cambia los estados, la grilla ni la geometría de los resultados.
+        return FuncAnimation(figura, actualizar_animacion, frames=indices,
                              fargs=(resultado, linea, texto, longitudes),
                              interval=1000 * periodo, repeat=False, blit=False,
                              cache_frame_data=False)
-    figura.tight_layout()
-    return figura, animacion
+
+    reproduccion = {"animacion": nueva_animacion()}
+
+    def reiniciar(evento) -> None:
+        """Detener el reproductor anterior y comenzar otra reproducción desde t=0.
+
+        ``evento`` es el evento de ratón recibido por el botón de Matplotlib.
+        Al terminar una reproducción, event_source puede ser None; en ese
+        caso solo se crea el nuevo temporizador y se dibuja el estado inicial.
+        """
+        anterior = reproduccion["animacion"]
+        # pause detiene el temporizador antes de sustituirlo. En el final
+        # natural Matplotlib ya lo detuvo y eliminó su referencia.
+        if anterior.event_source is not None:
+            anterior.pause()
+        reproduccion["animacion"] = nueva_animacion()
+        actualizar_animacion(0, resultado, linea, texto, longitudes)
+        # Dibujar ahora inicializa el nuevo reproductor antes de otro clic,
+        # sin dejar su arranque pendiente de un redraw futuro.
+        figura.canvas.draw()
+
+    # Reservar una franja inferior antes de agregar el eje del botón evita
+    # que tight_layout superponga el control con la etiqueta X del gráfico.
+    figura.tight_layout(rect=(0.0, 0.13, 1.0, 1.0))
+    eje_boton = figura.add_axes((0.20, 0.025, 0.60, 0.065))
+    boton = Button(eje_boton, "Volver a reproducir")
+    boton.on_clicked(reiniciar)
+    reproduccion["boton"] = boton
+    # Los widgets y los reproductores necesitan referencias persistentes para
+    # recibir eventos después de que esta función haya retornado.
+    figura._reproduccion = reproduccion
+    return figura, reproduccion["animacion"]
