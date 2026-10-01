@@ -1,8 +1,8 @@
 """Dinámica propia del 2R: trazas con pseudoinercias y símbolos de Christoffel.
 
 Las expresiones se derivan al construir una instancia y se evalúan con NumPy.
-El modelo de esta etapa contiene solamente las barras, sin accionamiento ni
-fricción. Las convenciones de posición y gravedad son las de ``crear_robot``.
+Incluye los cuerpos rígidos y la inercia reflejada diagonal de los rotores.
+La fricción y la saturación se aplican por separado durante la integración.
 """
 
 import numpy as np
@@ -45,7 +45,7 @@ def pseudoinercia(masa: float, centro: np.ndarray, inercia: np.ndarray) -> sp.Ma
 
 
 class Dinamica:
-    """Derivación simbólica y evaluación numérica de un modelo 2R sin actuadores.
+    """Derivación simbólica y evaluación numérica de un modelo 2R plano.
 
     Recibe el DH estándar construido por ``crear_robot``: base/herramienta
     identidad, d=alpha=offset=0 y dos articulaciones revolutas. Se crea una
@@ -57,7 +57,7 @@ class Dinamica:
     def __init__(self, robot: rtb.DHRobot) -> None:
         """Derivar M, C, G, Ṁ y potencial y preparar sus funciones numéricas.
 
-        Lee longitudes, masas, centros, tensores y gravedad del robot, sin
+        Lee longitudes, masas, centros, tensores, rotor y gravedad del robot, sin
         invocar sus rutinas dinámicas. ``q_simbolica`` y ``qd_simbolica``
         identifican las variables; las matrices simbólicas quedan disponibles
         para inspección y las funciones compiladas se usan en cada evaluación.
@@ -91,6 +91,13 @@ class Dinamica:
                 m[s, k] = sp.trigsimp(sum(
                     sp.trace(derivadas[i][s] * pseudoinercias[i] * derivadas[i][k].T)
                     for i in range(2)))
+        self.M_cuerpos_simbolica = sp.ImmutableMatrix(m)
+        # El término constante N²Jm representa la rotación relativa del rotor
+        # aproximada. La composición rígida no contiene esta inercia reflejada.
+        # Se omiten expresamente los acoplamientos adicionales de los rotores.
+        reflejadas = [_racional(link.G)**2 * _racional(link.Jm) for link in robot.links]
+        self.inercias_reflejadas = np.array(reflejadas, dtype=float)
+        m += sp.diag(*reflejadas)
         self.M_simbolica = sp.ImmutableMatrix(m)
 
         # Christoffel fija una representación de C coherente con M. Las
@@ -155,7 +162,8 @@ class Dinamica:
         """Calcular torque (2,) en N·m: M(q)qdd+C(q,qd)qd+G(q).
 
         q, qd y qdd tienen dos componentes en rad, rad/s y rad/s².
-        No añade fricción ni satura torque: esos efectos pertenecen a la etapa 5.
+        Incluye N²Jm. No añade fricción ni satura torque: esos efectos se
+        aplican por separado en la planta de simulación.
         """
         # Componer los tres términos conserva sus unidades y permite
         # contrastarlos por separado con la dinámica inversa de Toolbox.

@@ -2,8 +2,8 @@
 
 ## Estado
 
-Están completadas las **etapas 1 a 4: entorno, modelo mecánico, cinemática,
-dinámica propia y movimiento libre con gráficos y animación**. Las etapas
+Están completadas las **etapas 1 a 5: entorno, modelo mecánico, cinemática,
+dinámica propia, integración, gráficos, animación, actuadores y rozamiento**. Las etapas
 siguientes requieren autorización por separado. El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
@@ -17,6 +17,9 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python main.py
 .venv/bin/python main.py --caso invertido
+.venv/bin/python main.py --modelo barras
+.venv/bin/python main.py --modelo actuado --friccion 0
+.venv/bin/python main.py --modelo actuado --friccion 0.5 --sin-graficos
 .venv/bin/python main.py --caso colgante --sin-graficos
 .venv/bin/python -m pytest -v
 ```
@@ -24,7 +27,10 @@ python3.12 -m venv .venv
 El punto de entrada muestra versiones, propiedades de las barras, posiciones de
 cuatro configuraciones y contraste de la dinámica en consola. Después simula
 el escenario elegido y muestra gráficos y animación en ventanas; por defecto
-ejecuta `oscilacion`. `--sin-graficos` omite las figuras y la espera de ventanas.
+ejecuta `oscilacion` con **montaje, rotores y fricción nominal**. `--modelo barras`
+recupera las barras ideales de las etapas anteriores. `--friccion` elige escala
+0, 0.5, 1 o 2; si se omite, vale 1 en actuado y 0 en barras.
+`--sin-graficos` omite las figuras y la espera de ventanas.
 No exporta datos, gráficos ni videos. En el IDE debe seleccionarse
 `.venv/bin/python` como intérprete. Para terminar la ejecución gráfica, cerrar
 ambas ventanas.
@@ -487,8 +493,9 @@ de energía y el contraste con tolerancias estrictas respaldan los recorridos
 en los horizontes examinados; la referencia estricta tampoco es una solución
 exacta y no se extrapola esta convergencia a tiempos arbitrarios.
 No se modificaron RK45, las tolerancias nominales ni las dependencias.
-Los escenarios aún no incluyen actuadores, fricción ni control. La
-**etapa 5 —actuadores, montaje y rozamiento— queda pendiente de autorización**.
+Las verificaciones de esta etapa se realizaron con barras sin actuadores,
+fricción ni control. Ese modelo se conserva mediante `--modelo barras`;
+el modelo ampliado y sus resultados se describen en la etapa 5.
 
 ### Reproducción manual añadida a la etapa 4
 
@@ -516,6 +523,219 @@ Verificaciones reproducibles con
 La mejora permite revisar el movimiento varias veces en la misma ventana.
 No cambió las condiciones de simulación, la selección de fotogramas ni la
 repetición automática desactivada. No se añadieron dependencias.
+
+## Actuadores, montaje y rozamiento: etapa 5
+
+### Parámetros verificados y alcance
+
+Se consultaron las fichas primarias de los motores con **escobillas de grafito,
+bobinado de 18 V**, y del reductor **GPX 22 A estándar**. Las fichas de motores
+son de febrero de 2025 y la de reductores de marzo de 2025; indican datos
+provisionales sujetos a cambios. Las relaciones de catálogo son aproximadas:
+se conserva `N=62` y `N=26`, sin atribuirles la precisión de una relación exacta
+de engranajes. `pendulo/parametros.py` conserva los datos en SI.
+
+| Magnitud | Eje 1: DCX 22 L + GPX 22 A | Eje 2: DCX 22 S + GPX 22 A |
+|---|---:|---:|
+| Masa del motor / reductor [kg] | 0.095 / 0.067 | 0.066 / 0.058 |
+| Diámetro / longitud del motor equivalente [m] | 0.022 / 0.0472 | 0.022 / 0.0342 |
+| Etapas / longitud del reductor [m] | 3 / 0.0322 | 2 / 0.0264 |
+| Inercia del rotor Jm [kg·m²] | 9.82e-7 | 5.22e-7 |
+| Inercia reflejada N²Jm [kg·m²] | 0.003774808 | 0.000352872 |
+| Torque nominal del motor [N·m] | 0.0322 | 0.0149 |
+| Torque continuo del reductor [N·m] | 1.20 | 0.70 |
+| Eficiencia máxima del reductor | 0.74 | 0.81 |
+| Velocidad nominal del motor [rpm] | 10800 | 10800 |
+| Velocidad continua máxima de entrada al reductor [rpm] | 12000 | 10000 |
+| Potencia continua transmisible del reductor [W] | 6 | 12 |
+| Límite de torque aplicado por la planta [N·m] | 1.20 | 0.31 |
+
+Los tamaños describen cilindros equivalentes; las longitudes del motor son las
+dimensiones máximas indicadas del cuerpo. La longitud efectiva del reductor
+depende de su configuración y del motor asociado, como advierte su ficha.
+No se consideran ejes salientes, cables, vaciados ni geometría interna real.
+
+La estimación de torque continuo es
+`min(τreductor, N·ηmax·τmotor_nominal)`: resulta `1.20 N·m` y `0.313794 N·m`.
+Se conservan los límites aprobados `1.20` y `0.31 N·m`. Esta estimación usa la
+**eficiencia máxima**, que no representa necesariamente la eficiencia a baja
+velocidad o en sostén. No garantiza la capacidad térmica de una construcción.
+La planta entrega torque ideal limitado, sin dinámica eléctrica ni térmica;
+no multiplica nuevamente por la eficiencia ni aplica una fricción de Toolbox.
+
+### Montaje coaxial y composición de cuerpos
+
+Se confirmó la opción más cercana al conjunto comercial: motor y reductor del
+eje 2 **coaxiales con Z, detrás de la barra y unidos a ella por una fijación**.
+Es una distribución equivalente para dinámica, inspirada en el conjunto de las
+fichas; no es un plano de montaje ni una geometría exacta del producto ensamblado.
+Los tres centros tienen X=Y=0 respecto de la terna DH del codo. La cara posterior
+de la barra está en Z=−5 mm; la fijación la sigue y después se apilan reductor y
+motor hacia Z negativo:
+
+| Cuerpo transportado | Masa [kg] | Diámetro × longitud [m] | Intervalo Z [m] | Centro en terna del codo [m] |
+|---|---:|---|---|---|
+| Fijación equivalente | 0.020 | 0.022 × 0.005, supuesto | [−0.010,−0.005] | (0,0,−0.0075) |
+| Reductor del eje 2 | 0.058 | 0.022 × 0.0264 | [−0.0364,−0.010] | (0,0,−0.0232) |
+| Motor del eje 2 | 0.066 | 0.022 × 0.0342 | [−0.0706,−0.0364] | (0,0,−0.0535) |
+
+Cada cuerpo usa su masa total de ficha o estimada y la distribución de un cilindro
+macizo uniforme. La fijación de 20 g es un equivalente de soporte y tornillería:
+su cilindro no define material, densidad ni una pieza que se pueda fabricar.
+Se omiten solapes del ensamblaje, ejes salientes, cables y detalles internos.
+La masa del motor incluye su rotor como masa transportada; N²Jm representa
+por separado su rotación relativa aproximada, sin añadir otra masa ni volver
+a insertar la inercia reflejada en el tensor rígido.
+
+`cilindro` calcula el tensor central de eje Z,
+`Ixx=Iyy=m(3R²+L²)/12`, `Izz=mR²/2`. `componer_cuerpos` suma masas, calcula
+`rG=sum(mi·ri)/sum(mi)` y aplica Steiner de cada centro al centro conjunto.
+`crear_robot_actuado` entrega a Toolbox ese **tensor central**, no el tensor
+trasladado al origen DH. El conjunto del codo pertenece al eslabón 1. El
+motor/reductor del eje 1 permanece fijo a la base: no modifica masa, centro,
+tensor ni potencial de los cuerpos móviles, aunque se conserva su rotor reflejado.
+
+El primer eslabón pasa de `0.108` a **`0.252 kg`** y de `rG=(−0.1,0,0)` a
+**`rG=(−0.0428571428571,0,−0.0199468253968) m`**, respecto de su terna DH distal.
+Su tensor central pasa del prisma original a:
+
+\[
+I_{G,1}=\begin{bmatrix}
+0.000139686034127&0&0.000215425714286\\
+0&0.001113228891270&0\\
+0.000215425714286&0&0.000989454857143
+\end{bmatrix}\ \mathrm{kg\,m^2}.
+\]
+
+El término XZ aparece por la distribución de centros en X y Z; no se descarta
+del tensor de Toolbox ni de la pseudoinercia. El segundo eslabón mantiene su
+masa `0.108 kg`, centro y tensor de barra. La masa móvil total es `0.360 kg`.
+Los desplazamientos axiales Z afectan el tensor completo, pero no las alturas
+Y, la cinemática XY ni el momento alrededor de Z de este modelo plano.
+
+### Inercia reflejada y planta
+
+`Dinamica` lee `Jm` y `G` de los eslabones de Toolbox y añade una sola vez
+`diag(G²Jm)` a la matriz derivada por trazas. `M_cuerpos_simbolica` permite
+inspeccionar la contribución rígida anterior a esa suma. El término es constante:
+no cambia C, G ni el potencial. Se omiten los acoplamientos adicionales del rotor
+tal como se acordó. El modelo de barras de las etapas previas conserva Jm=0.
+
+El montaje añade `diag(0.005768712,0) kg·m²` a M: `0.144·0.20²` por transportar
+la masa del conjunto en el codo y `0.144·0.011²/2` por los cilindros alrededor
+de Z. Los rotores añaden `diag(0.003774808,0.000352872) kg·m²`. El incremento
+total respecto de las barras es `diag(0.009543520,0.000352872) kg·m²`.
+Las expresiones ampliadas, redondeando residuos de punto flotante, son:
+
+\[
+M=\begin{bmatrix}
+0.01675072+0.00432\cos q_2&0.0014436+0.00216\cos q_2\\
+0.0014436+0.00216\cos q_2&0.001796472
+\end{bmatrix},
+\]
+
+\[
+G=\begin{bmatrix}
+0.600372\cos q_1+0.105948\cos(q_1+q_2)\\
+0.105948\cos(q_1+q_2)
+\end{bmatrix},\quad
+U=0.600372\sin q_1+0.105948\sin(q_1+q_2).
+\]
+
+M está en kg·m², G en N·m y U en J. C conserva la expresión de la etapa 3:
+el incremento de M es constante, y los cuerpos del codo giran únicamente con
+q1. La gravedad máxima por eje es `(0.70632,0.105948) N·m`, alcanzada con
+ambas barras horizontales en q=(0,0). El peso transportado añade `0.282528 N·m`
+al máximo del eje 1; el eje 2 permanece igual.
+
+`Friccion.torque(qd)` evalúa, en unidades articulares:
+
+\[
+f(\dot q)=B\dot q+T_c\tanh(\dot q/\varepsilon),\quad
+B=(0.02,0.005),\quad T_c=(0.03,0.01),\quad\varepsilon=0.01.
+\]
+
+B está en N·m·s/rad, Tc en N·m y epsilon en rad/s. A 3 rad/s resulta
+`f=(0.09,0.025) N·m`, equivalente al `7.5%` y `8.0645%` de los límites
+iniciales. Son **supuestos**, no parámetros identificados ni tomados de fichas.
+La escala multiplica B y Tc: 0, 0.5, 1 y 2 representan rozamiento nulo, medio,
+nominal y doble. La función es impar, suave y nula en reposo; no incluye fricción
+estática, juego, elasticidad ni histéresis.
+
+`simular_planta` recibe una función pura `torque(t,q,qd)` y resuelve
+`M·qdd=τaplicado−C·qd−G−f`, con saturación simétrica por eje. La función de
+torque se evalúa durante RK45 y nuevamente en la salida para registrar los
+torques de cada muestra; no debe modificar entradas ni tener efectos laterales.
+Los registros `torque_solicitado`, `torque_aplicado` y `rozamiento` tienen forma
+`(n,2)` en N·m y comparten tiempos con los estados y las energías. No son el
+historial de pasos internos del integrador. `simular_libre` reutiliza la misma
+planta sin torque externo, con rozamiento opcional y nulo por defecto.
+
+### Verificaciones y resultados de cierre
+
+Las pruebas de etapa 5 se reproducen con
+`.venv/bin/python -m pytest tests/test_actuacion.py -v -s`; la suite completa con
+`.venv/bin/python -m pytest -v -s`. Pasaron **49 casos**: las verificaciones previas,
+13 de actuación y dos selecciones adicionales del punto de entrada. Se verificó
+que todas las funciones propias tengan docstring y que el diff no presente errores
+de whitespace. La revisión gráfica se realizó en memoria y también con TkAgg.
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Regresión dinámica y libre | Pruebas de etapas 3 y 4 con barras sin rotor ni rozamiento | Conservar sus tolerancias y resultados físicos | 18 casos aprobados | Cumplida | La extensión mantiene el movimiento ideal previo. |
+| Inercia reflejada sin duplicación | Modelo auxiliar con barras y rotores, sin masa de carcasa; 81 posiciones en [-π,π]² | Incremento diag(0.003774808,0.000352872) kg·m²; contraste con Toolbox ≤1e-12 kg·m² | Incremento esperado; diferencia máxima 1.735e-18 kg·m² | Cumplida | Aísla el efecto de los rotores de la composición de cuerpos. |
+| Montaje: masa, centro y tensor | Cilindros y barra en la terna del codo; sumar inercias en el origen y trasladar el total al centro conjunto, como ruta independiente | Masa 0.252 kg, centro y tensor indicados arriba; diferencias ≤1e-12 en las unidades respectivas; tensor positivo | Valores esperados; diferencia máxima de tensor 6.505e-19 kg·m²; autovalor mínimo 8.81935e-5 kg·m² | Cumplida | La composición conserva la referencia central y el producto XZ; el eslabón 2 mantiene sus propiedades originales. |
+| Cinemática del montaje | Comparar modelos actuado y de barras en 81 configuraciones en [-π,π]² | Posiciones de base, codo y extremo iguales a 1e-12 m | Coinciden en todas las configuraciones | Cumplida | Cambiar distribución de masa no cambia DH ni la geometría plana. |
+| Incrementos físicos separados | Restar la M analítica de barras a la ampliada en 81 posiciones; contrastar C con su expresión previa | Montaje diag(0.005768712,0), rotor diag(0.003774808,0.000352872) kg·m²; C idéntica a 1e-12 kg·m²/s | Todas las diferencias cumplen | Cumplida | Se distinguen masa transportada, momento cilíndrico y rotación del rotor, sin repetir N²Jm. |
+| Contraste dinámico ampliado | 324 estados: 9 ángulos por eje y 4 pares qd/qdd hasta ±3 rad/s y ±6 rad/s²; RNE de Toolbox con B=Tc=0 | Diferencias ≤1e-12 kg·m² para M y ≤1e-12 N·m para G, Cqd e inversa | Máximos: M 3.469e-18 kg·m²; G 1.110e-16 N·m; Cqd 1.388e-17 N·m; inversa 2.220e-16 N·m | Cumplida | Las rutas coinciden numéricamente con las mismas aproximaciones. Toolbox no implementa la fricción tanh: se añade aparte al contraste de inversa de planta. |
+| M y Christoffel ampliadas | Grilla de 625 posiciones, qd=(1.2,−0.7) rad/s | M simétrica a 1e-12 kg·m² y positiva; parte simétrica de Mdot−2C ≤1e-12 kg·m²/s | Autovalor mínimo 0.00114476263798 kg·m²; residuo de antisimetría 8.674e-19 kg·m²/s | Cumplida | Los rotores aumentan la inercia diagonal sin introducir términos de velocidad adicionales. La grilla no demuestra todos los estados. |
+| Potencial y gravedad ampliados | 625 posiciones; alturas independientes de barras y masa de codo; diferencias centrales h=1e-6 rad | U coincide a 1e-12 J; G coincide con gradiente a 1e-9 N·m; sostén nulo colgante e invertido a 1e-12 N·m | ΔU máximo 2.220e-16 J; ΔgradU máximo 1.344e-10 N·m; torques conocidos cumplen | Cumplida | El montaje aumenta el peso sobre el eje 1 y conserva el signo de gravedad. |
+| Rozamiento y sentido resistente | 441 pares de velocidades entre −3 y 3 rad/s por escala 0/0.5/1/2, incluyendo cero y transición tanh | f impar a 1e-14 N·m; f(0)=0; qd·f≥0 W; pendiente en cero a 1e-10 N·m·s/rad | Potencia mínima 0 W; nominal f(3,3)=(0.09,0.025) N·m y pendiente (3.02,1.005) N·m·s/rad | Cumplida | Verifica una resistencia suave y disipativa en los estados muestreados. |
+| Saturación sin alterar solicitudes | 25 combinaciones dentro, sobre y fuera de ambos límites | Recorte exacto a ±(1.20,0.31) N·m; entradas idénticas | Todas coinciden con min/max por eje; arrays originales intactos | Cumplida | Solo se limita el torque. |
+| Efecto físico y registro de saturación | Modelo completo; colgante en reposo, 0.05 s, rozamiento nominal; pedir (2,−1) y (1.20,−0.31) N·m | Estados iguales a 1e-12 rad y rad/s; registros pedidos/aplicados exactos | Diferencia 0 rad y 0 rad/s; pedido (2,−1), aplicado (1.20,−0.31) N·m | Cumplida | La planta recibe el torque aplicado y conserva el pedido para diagnóstico. |
+| Trabajo y pérdidas en arranque | Caso anterior; integrar potencia neta por trapecios con salida 1 ms y repetir a 0.1 ms, mismas tolerancias RK45 | Residuo menor al refinar la cuadratura; fino ≤1e-6 J; estados comunes a 1e-12 rad | Residuos 1.42083e-5 y 1.48926e-7 J, respectivamente; estados coincidentes | Cumplida | La transición de tanh al arrancar exige salida más fina para integrar trabajo; no fue necesario cambiar la planta ni RK45. |
+| Conservación sin rozamiento | Modelo completo; oscilación de 5 s desde q=(−π/2+0.3,−0.2) rad, qd=(0.4,−0.1) rad/s; tolerancias nominales, salida 1 ms | Variación de energía ≤1e-5 J | Máxima variación 8.862e-9 J; 2174 evaluaciones de planta | Cumplida | La inercia reflejada se incluye también en la energía cinética. |
+| Disipación sin control | Mismo caso con fricción nominal; todos los pedidos/aplicados cero | Energía decreciente, incremento entre muestras ≤1e-9 J, pérdida neta positiva | E0=−0.677430650735218 J, Efinal=−0.706257966381397 J; caída 0.0288273156462 J; máximo incremento −6.644e-9 J; 8864 evaluaciones | Cumplida | El movimiento se amortigua por pérdidas físicas del modelo, sin torque de control ni recortes de estado. |
+| Balance de pérdidas libre | Integrar qd·f por trapecios; repetir salida de 1 ms a 0.1 ms, mismas tolerancias | Integral compatible con caída energética; residuo fino ≤1e-6 J y menor que nominal | Integral nominal 0.0288273947065 J; residuos −7.906e-8 J y −7.099e-10 J | Cumplida | La disipación local explica el cambio de energía de la planta ampliada. |
+| Convergencia con fricción | Misma oscilación y grilla; repetir con rtol=1e-9 y atol=1e-11 | Diferencias ≤1e-4 rad y ≤1e-3 rad/s | Δq máximo 3.594e-9 rad; Δqd máximo 4.685e-8 rad/s; 14462 evaluaciones estrictas | Cumplida | No fue necesario cambiar integrador, tolerancias nominales ni regularización. La referencia estricta no es solución exacta. |
+| Ausencia de recortes de estado | q0=(π−0.001,0) rad, qd0=(4,−4) rad/s; libre sin fricción, 2 ms | Velocidad inicial conservada y q1 final mayor que π | q1 final=3.14866398632 rad; velocidad máxima 4.07132539831 rad/s | Cumplida | El rango de destinos y los 3 rad/s de referencias no se convierten en topes de planta. |
+| Reserva estática | Máximo analítico por pesos y contraste del G ampliado en horizontal | Demanda inferior a (1.20,0.31) N·m | Gmax=(0.70632,0.105948) N·m; reserva=(0.49368,0.204052) N·m | Cumplida para el modelo | El sostén cabe en los límites iniciales; la eficiencia real y la construcción permanecen fuera de esta comprobación. |
+| Velocidad y potencia de selección | Salida prevista 3 rad/s, torque en cada límite; cotejo con fichas | Entrada menor a nominal del motor y máxima continua del reductor; potencia de salida menor a transmisible | Entrada=(1776.17,744.845) rpm; potencia=(3.60,0.93) W frente a (6,12) W | Cumplida como estimación | No evalúa aún demanda de seguimiento, eficiencia real ni calentamiento. |
+| Torque y potencia mecánica de motores | τmotor=τlímite/(N·ηmax), Pmotor=Psalida/ηmax; punto nominal calculado con torque/rpm de ficha | Torque motor menor al nominal y potencia mecánica menor a la del punto nominal | Torque=(0.0261552,0.0147198) N·m frente a (0.0322,0.0149); potencia estimada=(4.86486,1.14815) W frente a (36.4173,16.8515) W | Cumplida como estimación | Emplea eficiencia máxima; la potencia nominal no define por sí sola una envolvente ni garantiza el funcionamiento a cualquier velocidad. |
+| Gráficos y fotograma ampliado | Oscilación nominal 5 s; render de cuatro paneles y animación en t=1 s, en memoria; geometría frente a Toolbox a 1e-12 m | Ejes, unidades y botón legibles; geometría y tiempo coincidentes | Figuras inspeccionadas sin recortes; t=1.000 s y geometría correctos | Cumplida | Se reconoce la amortiguación y la pérdida energética sin exportaciones. |
+| Ventanas ampliadas y reproducción | TkAgg; recorrido de 0.105 s con fricción nominal; reiniciar al comenzar y completar dos ciclos posteriores | Temporizador real llega al final; reinicios a t=0; geometrías extremas a 1e-12 m; resultados intactos | Ambos ciclos terminan en t=0.105 s; igualdad exacta de estados, energías y los tres registros de torque | Cumplida | El montaje ampliado funciona con la visualización y el botón existentes. |
+| Punto de entrada y regresión completa | Ejecutar main.py sin gráficos: actuado nominal por defecto, barras ideales y actuado con fricción media; suite completa | Código 0, modelo y fricción seleccionados correctamente, verificaciones previas conservadas | Tres procesos correctos; 49 casos aprobados | Cumplida | El caso ideal sigue disponible y el uso normal incluye la etapa 5. |
+
+### Análisis conjunto y continuidad
+
+La etapa verifica la composición mecánica, los términos dinámicos, la fricción
+disipativa y la entrada de torque limitado. El montaje agrega peso y una inercia
+constante al eje 1; ambos rotores aumentan su diagonal correspondiente. C permanece
+igual porque la distribución añadida depende solo de q1 y su inercia articular
+es constante. La cinemática, el rango sin topes y la reproducción en memoria
+se conservan.
+
+Los candidatos mantienen los límites aprobados. La reserva sobre el máximo de
+gravedad es `0.49368 N·m` en el eje 1 y `0.204052 N·m` en el eje 2: capacidades
+de aproximadamente 1.70 y 2.93 veces la demanda estática. A 3 rad/s, las
+velocidades y potencias de selección quedan por debajo de los valores de ficha
+indicados. El eje 1 queda limitado por el reductor; el eje 2 por la estimación
+de torque del motor multiplicada por N y la eficiencia máxima del reductor.
+En este último, `0.313794 N·m` supera al límite `0.31 N·m` apenas alrededor
+de un 1.2%: no es una reserva comprobada frente a pérdidas reales de transmisión.
+
+La eficiencia de ficha es máxima y la distribución de masa es equivalente.
+La fijación es una estimación, no un diseño estructural. No se verifica
+calentamiento, precisión constructiva, juego ni electrónica; tampoco se aplica
+un recorte de velocidad o potencia que altere la planta. Las pruebas aportan
+evidencia numérica para este modelo y estos horizontes, no una certificación
+de los componentes físicos ni de todos los estados posibles.
+
+La etapa 5 queda completada. La **demanda durante seguimiento, la recuperación
+del invertido y la precisión de PD/PD con gravedad se verificarán en la etapa 6**,
+que requiere autorización separada. Allí se compararán los torques registrados,
+velocidades y potencias efectivas con estas capacidades; cualquier incumplimiento
+motivará un análisis y una propuesta antes de cambiar ganancias o componentes.
 
 ## Diseño aprobado para las siguientes etapas
 

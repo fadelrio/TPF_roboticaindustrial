@@ -3,7 +3,8 @@
 import numpy as np
 import roboticstoolbox as rtb
 
-from .parametros import BARRAS, GRAVEDAD, Barra
+from .parametros import (ACTUADORES, BARRAS, GRAVEDAD, Actuador, Barra,
+                        componentes_codo, componer_cuerpos)
 
 
 def crear_robot(barras: tuple[Barra, Barra] = BARRAS) -> rtb.DHRobot:
@@ -35,10 +36,34 @@ def crear_robot(barras: tuple[Barra, Barra] = BARRAS) -> rtb.DHRobot:
     return rtb.DHRobot(eslabones, gravity=GRAVEDAD, name="Doble péndulo 2R: barras")
 
 
+def crear_robot_actuado(
+    barras: tuple[Barra, Barra] = BARRAS,
+    actuadores: tuple[Actuador, Actuador] = ACTUADORES,
+) -> rtb.DHRobot:
+    """Construir el 2R con montaje transportado e inercia de los dos rotores.
+
+    El motor y reductor del eje 1 quedan fijos a la base: no se suman a
+    los cuerpos móviles. El conjunto del eje 2 y su fijación pertenecen al
+    primer eslabón, centrados en el codo y detrás de la barra. Jm y G se
+    cargan por separado para representar N²Jm una sola vez en la dinámica.
+    La fricción suave articular se aplica fuera de Toolbox: aquí B=Tc=0.
+    """
+    robot = crear_robot(barras)
+    conjunto = componer_cuerpos((barras[0], *componentes_codo(barras[0], actuadores[1])))
+    primero = robot.links[0]
+    # La distribución conjunta se entrega como centro y tensor central;
+    # no incluir el segundo motor en el eslabón 2 ni el motor fijo de base.
+    primero.m, primero.r, primero.I = conjunto.masa, conjunto.centro_masa, conjunto.inercia
+    for eslabon, actuador in zip(robot.links, actuadores):
+        eslabon.Jm, eslabon.G = actuador.inercia_rotor, actuador.relacion
+    robot.name = "Doble péndulo 2R: actuado"
+    return robot
+
+
 def posiciones_toolbox(robot: rtb.DHRobot, q: np.ndarray) -> np.ndarray:
     """Retornar posiciones XYZ de base, codo y extremo como array (3, 3), en m.
 
-    ``robot`` es el 2R creado por ``crear_robot`` y ``q`` contiene los dos
+    ``robot`` es uno de los modelos 2R del proyecto y ``q`` contiene los dos
     ángulos en radianes. Incluye explícitamente la terna base en fkine_all.
     No altera el estado almacenado del robot ni los ángulos recibidos.
     """

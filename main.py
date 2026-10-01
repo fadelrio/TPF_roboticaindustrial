@@ -7,14 +7,15 @@ import matplotlib.pyplot as plt
 
 from pendulo import verificar_entorno
 from pendulo.dinamica import Dinamica
-from pendulo.modelo import crear_robot, posiciones_geometricas, posiciones_toolbox
-from pendulo.parametros import BARRAS
+from pendulo.modelo import (crear_robot, crear_robot_actuado,
+                            posiciones_geometricas, posiciones_toolbox)
+from pendulo.parametros import ACTUADORES, BARRAS, Friccion
 from pendulo.simulacion import simular_libre
 from pendulo.visualizacion import crear_animacion, graficar_resultado
 
 
-# Estos escenarios son condiciones reproducibles de la etapa 4. Ninguno
-# aplica torque ni fricción; sus posiciones iniciales se expresan en radianes.
+# Estos escenarios conservan las condiciones reproducibles de la etapa 4.
+# No aplican torque; el modelo y la fricción se seleccionan por separado.
 ESCENARIOS_LIBRES = {
     "colgante": {"q0": (-np.pi / 2, 0.0), "qd0": (0.0, 0.0), "duracion": 5.0},
     "invertido": {"q0": (np.pi / 2 + np.deg2rad(1), 0.0), "qd0": (0.0, 0.0), "duracion": 2.0},
@@ -29,11 +30,17 @@ def main() -> None:
     ``--sin-graficos`` ejecuta las cuentas y el resumen en consola, sin crear
     figuras ni esperar ventanas. La ejecución normal muestra gráficos y
     animación desde los resultados en memoria, sin exportar archivos.
+    ``--modelo actuado`` (por defecto) incluye montaje, rotores y fricción
+    nominal; ``--modelo barras`` conserva el caso ideal de las etapas previas.
+    ``--friccion`` permite elegir escala 0, 0.5, 1 o 2 explícitamente.
     """
     # Las opciones seleccionan escenarios concretos y permiten ejecutar el
     # mismo programa en el IDE o en verificaciones sin interfaz gráfica.
     parser = argparse.ArgumentParser(description="Simulación del doble péndulo 2R")
     parser.add_argument("--caso", choices=ESCENARIOS_LIBRES, default="oscilacion")
+    parser.add_argument("--modelo", choices=["barras", "actuado"], default="actuado")
+    parser.add_argument("--friccion", type=float, choices=[0.0, 0.5, 1.0, 2.0],
+                        help="Escala: por defecto 1 en actuado y 0 en barras")
     parser.add_argument("--sin-graficos", action="store_true", help="Solo cuentas y consola")
     opciones = parser.parse_args()
     # Conservar el diagnóstico inicial permite comprobar el entorno usado.
@@ -99,21 +106,54 @@ def main() -> None:
     print(f"Torque inverso propio/Toolbox [N·m]: {propio} / {referencia}")
     print(f"Diferencia máxima de inversa [N·m]: {np.max(np.abs(propio - referencia)):.3e}")
 
-    # Reutilizar la dinámica derivada: la integración evalúa M, C y G en
-    # pasos adaptativos, entregando estados y energías cada 1 ms.
+    # Esta cabecera mantiene explícita la relación con la integración libre
+    # de la etapa 4. El modelo ampliado se deriva solo si fue seleccionado.
     print("\nEtapa 4 — Movimiento libre e integración")
+    print("\nEtapa 5 — Actuadores, montaje y rozamiento")
+    if opciones.modelo == "actuado":
+        robot = crear_robot_actuado()
+        dinamica = Dinamica(robot)
+        for indice, (eslabon, actuador) in enumerate(zip(robot.links, ACTUADORES), start=1):
+            print(f"Eslabón {indice}: masa [kg]={eslabon.m:.12g}; "
+                  f"centro DH [m]={eslabon.r}")
+            print(f"Tensor central [kg·m²]:\n{eslabon.I}")
+            print(f"Actuador: {actuador.nombre}; N≈{actuador.relacion:g}; "
+                  f"N²Jm [kg·m²]={actuador.inercia_reflejada:.12g}; "
+                  f"límite [N·m]={actuador.limite_torque}")
+            # La selección se contrasta a la velocidad articular prevista,
+            # sin atribuir al seguimiento una verificación que aún no existe.
+            rpm = 3 * actuador.relacion * 60 / (2 * np.pi)
+            print(f"A 3 rad/s: entrada [rpm]={rpm:.9g}; "
+                  f"potencia al límite [W]={3 * actuador.limite_torque:.9g}")
+        print(f"Gravedad máxima por eje [N·m]: {dinamica.G([0, 0])}")
+        print(f"Contraste M con Toolbox en q=(0,0) [kg·m²]: "
+              f"{np.max(np.abs(dinamica.M([0, 0]) - robot.inertia([0, 0]))):.3e}")
+    escala = opciones.friccion
+    if escala is None:
+        escala = 1.0 if opciones.modelo == "actuado" else 0.0
+    friccion = Friccion(escala=escala)
+    print(f"Modelo seleccionado: {opciones.modelo}; escala de fricción: {escala}")
+    print(f"Fricción a 3 rad/s por eje [N·m]: {friccion.torque([3, 3])}")
+
+    # Las expresiones compiladas alimentan una única planta con registros
+    # de torque y fricción, conservando los estados sin recortes artificiales.
     caso = ESCENARIOS_LIBRES[opciones.caso]
-    libre = simular_libre(dinamica, **caso)
+    libre = simular_libre(dinamica, **caso, friccion=friccion)
     print(f"Caso: {opciones.caso}; q0 [rad]={caso['q0']}; qd0 [rad/s]={caso['qd0']}")
     print(f"Duración [s]: {libre.t[-1]}; muestras: {len(libre.t)}; evaluaciones: {libre.evaluaciones}")
     print(f"q final [rad]: {libre.q[-1]}; qd final [rad/s]: {libre.qd[-1]}")
     print(f"E inicial/final [J]: {libre.energia[0]:.12g} / {libre.energia[-1]:.12g}")
     print(f"Variación máxima de E [J]: {np.max(np.abs(libre.energia - libre.energia[0])):.9g}")
+    print(f"Máximo torque solicitado/aplicado [N·m]: "
+          f"{np.max(np.abs(libre.torque_solicitado), axis=0)} / "
+          f"{np.max(np.abs(libre.torque_aplicado), axis=0)}")
+    print(f"Máximo rozamiento [N·m]: {np.max(np.abs(libre.rozamiento), axis=0)}")
     if not opciones.sin_graficos:
         # Mantener ambos objetos locales vivos durante show evita que la
         # animación sea recolectada antes de reproducirse.
-        figura_graficos = graficar_resultado(libre, opciones.caso)
-        figura_animacion, animacion = crear_animacion(libre, opciones.caso, longitudes)
+        nombre = f"{opciones.caso} — {opciones.modelo}, fricción ×{escala:g}"
+        figura_graficos = graficar_resultado(libre, nombre)
+        figura_animacion, animacion = crear_animacion(libre, nombre, longitudes)
         plt.show()
 
 
