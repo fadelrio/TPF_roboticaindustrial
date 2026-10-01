@@ -1,5 +1,8 @@
 """Gráficos y animación 2D de resultados ya calculados, sin exportaciones."""
 
+from collections.abc import Callable
+from functools import partial
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -56,13 +59,16 @@ def graficar_seguimientos(
     remuestreo. Los resultados deben corresponder a una referencia común,
     dibujada una sola vez desde el primero. ``limite_error`` se expresa en
     grados: 2 para seguimiento nominal o 0,2 para observar recuperación.
+    Con tres o más resultados usa una leyenda común fuera de los paneles
+    para conservar visibles las curvas durante comparaciones y barridos.
     Devuelve una figura sin mostrarla, exportarla ni reintegrar los estados.
     """
     if not resultados:
         raise ValueError("La comparación debe incluir al menos un resultado.")
     if not np.isfinite(limite_error) or limite_error <= 0:
         raise ValueError("El límite de error debe ser positivo y finito.")
-    figura, ejes = plt.subplots(3, 2, sharex=True, figsize=(11, 9))
+    muchos = len(resultados) >= 3
+    figura, ejes = plt.subplots(3, 2, sharex=True, figsize=(14, 9) if muchos else (11, 9))
     figura.suptitle(nombre)
     primero = next(iter(resultados.values()))
     colores = plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -107,8 +113,24 @@ def graficar_seguimientos(
     # comparaciones aun cuando las señales de dos controladores se aproximen.
     for eje in ejes.flat:
         eje.grid(True, alpha=0.3)
-        eje.legend(loc="best")
-    figura.tight_layout()
+        if not muchos:
+            eje.legend(loc="best")
+    if muchos:
+        # Separar identificadores y estilos evita repetir ocho o más entradas
+        # de torque dentro de cada panel, tapando los picos de las señales.
+        leyenda = [Line2D([], [], color=colores[i % len(colores)], label=nombre)
+                   for i, nombre in enumerate(resultados)]
+        leyenda.extend([
+            Line2D([], [], color="black", linestyle="--", label="Referencia articular"),
+            Line2D([], [], color="black", linestyle="-", label="Torque solicitado"),
+            Line2D([], [], color="black", linestyle="--", label="Torque aplicado"),
+            Line2D([], [], color="gray", linestyle=":", label="Guías de límites"),
+        ])
+        figura.legend(handles=leyenda, loc="upper right", fontsize=9,
+                      bbox_to_anchor=(0.99, 0.94))
+        figura.tight_layout(rect=(0.0, 0.0, 0.76, 0.97))
+    else:
+        figura.tight_layout()
     return figura
 
 
@@ -163,14 +185,92 @@ def crear_animacion(
     # último asegura que la animación alcance la muestra final del resultado.
     objetivos = np.arange(0.0, resultado.t[-1], periodo)
     indices = np.unique(np.append(np.searchsorted(resultado.t, objetivos), len(resultado.t) - 1))
-    actualizar_animacion(0, resultado, linea, texto, longitudes)
+    actualizar = partial(actualizar_animacion, resultado=resultado, linea=linea,
+                         texto=texto, longitudes=longitudes)
+    actualizar(0)
+    return figura, _agregar_reproductor(figura, actualizar, indices, periodo)
+
+
+def crear_animacion_comparada(
+    resultados: dict[str, ResultadoSeguimiento],
+    nombre: str = "Comparación",
+    longitudes: tuple[float, float] = (0.20, 0.20),
+    periodo: float = 0.020,
+) -> tuple[Figure, FuncAnimation]:
+    """Animar simultáneamente resultados con grilla temporal exactamente común.
+
+    Cada identificador del diccionario tiene una polilínea XY de base, codo
+    y extremo, con el mismo color usado por ``graficar_seguimientos``. Todos
+    dibujan el mismo índice bajo un reloj común. No remuestrea ni integra;
+    rechaza grillas distintas, incluso si comparten el último tiempo.
+    ``longitudes`` está en m y ``periodo`` en s. Incluye el último fotograma
+    y mantiene allí la imagen. El botón reinicia desde t=0 usando los datos
+    en memoria, durante o después de la reproducción. Retorna la figura y
+    primera animación; ``figura._reproduccion`` conserva botón y vigente.
+    """
+    if not resultados:
+        raise ValueError("La comparación debe incluir al menos un resultado.")
+    if not np.isfinite(periodo) or periodo <= 0:
+        raise ValueError("El período de animación debe ser positivo y finito.")
+    primero = next(iter(resultados.values())).simulacion
+    for resultado in resultados.values():
+        # Una igualdad exacta impide dibujar como simultáneos estados que
+        # corresponden a tiempos físicos distintos, sin interpolación oculta.
+        if not np.array_equal(resultado.simulacion.t, primero.t):
+            raise ValueError("Las animaciones comparadas requieren la misma grilla de tiempos.")
+    figura, eje = plt.subplots(figsize=(6, 6))
+    alcance = sum(longitudes)
+    eje.set(xlim=(-1.1 * alcance, 1.1 * alcance), ylim=(-1.1 * alcance, 1.1 * alcance),
+            xlabel="X [m]", ylabel="Y [m]", title=nombre)
+    eje.set_aspect("equal")
+    eje.grid(True, alpha=0.3)
+    colores = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    lineas = []
+    for indice, identificador in enumerate(resultados):
+        # Mantener el orden del diccionario conserva la identidad visual
+        # de cada instancia entre gráficos y reproducción simultánea.
+        linea, = eje.plot([], [], "o-", linewidth=2,
+                          color=colores[indice % len(colores)], label=identificador)
+        lineas.append(linea)
+    eje.legend(loc="upper right")
+    texto = eje.text(0.04, 0.94, "", transform=eje.transAxes)
+    objetivos = np.arange(0.0, primero.t[-1], periodo)
+    indices = np.unique(np.append(np.searchsorted(primero.t, objetivos), len(primero.t) - 1))
+
+    def actualizar(indice: int) -> tuple:
+        """Dibujar todos los robots en la misma muestra y actualizar un reloj.
+
+        Cada polilínea usa q[indice] de su propio resultado; los tiempos
+        son idénticos por contrato. Retorna los artistas actualizados.
+        """
+        for linea, resultado in zip(lineas, resultados.values()):
+            # La cinemática únicamente transforma los ángulos ya calculados;
+            # no se vuelve a resolver la dinámica al avanzar o reiniciar.
+            puntos = posiciones_geometricas(resultado.simulacion.q[indice], longitudes)
+            linea.set_data(puntos[:, 0], puntos[:, 1])
+        texto.set_text(f"t = {primero.t[indice]:.3f} s")
+        return (*lineas, texto)
+
+    actualizar(0)
+    return figura, _agregar_reproductor(figura, actualizar, indices, periodo)
+
+
+def _agregar_reproductor(
+    figura: Figure, actualizar: Callable[[int], tuple], indices: np.ndarray, periodo: float,
+) -> FuncAnimation:
+    """Conectar el temporizador y botón a artistas existentes de una figura.
+
+    ``actualizar(indice)`` dibuja los datos originales y retorna sus artistas.
+    ``indices`` selecciona las muestras y ``periodo`` está en s. La figura
+    retiene botón y animación vigente; retorna la primera para conservar
+    las interfaces de animación simple y comparada.
+    """
 
     def nueva_animacion() -> FuncAnimation:
         """Crear un reproductor desde el primer índice sobre los artistas existentes."""
         # Cada FuncAnimation recibe una nueva secuencia de los mismos índices;
         # no cambia los estados, la grilla ni la geometría de los resultados.
-        return FuncAnimation(figura, actualizar_animacion, frames=indices,
-                             fargs=(resultado, linea, texto, longitudes),
+        return FuncAnimation(figura, actualizar, frames=indices,
                              interval=1000 * periodo, repeat=False, blit=False,
                              cache_frame_data=False)
 
@@ -189,7 +289,7 @@ def crear_animacion(
         if anterior.event_source is not None:
             anterior.pause()
         reproduccion["animacion"] = nueva_animacion()
-        actualizar_animacion(0, resultado, linea, texto, longitudes)
+        actualizar(0)
         # Dibujar ahora inicializa el nuevo reproductor antes de otro clic,
         # sin dejar su arranque pendiente de un redraw futuro.
         figura.canvas.draw()
@@ -204,4 +304,4 @@ def crear_animacion(
     # Los widgets y los reproductores necesitan referencias persistentes para
     # recibir eventos después de que esta función haya retornado.
     figura._reproduccion = reproduccion
-    return figura, reproduccion["animacion"]
+    return reproduccion["animacion"]

@@ -170,3 +170,35 @@ def test_rechaza_comparacion_vacia() -> None:
     # La referencia común requiere al menos una trayectoria disponible.
     with pytest.raises(ValueError, match="al menos un resultado"):
         graficar_seguimientos({})
+
+
+def test_leyenda_comun_no_cubre_paneles(comparacion_en_memoria: dict) -> None:
+    """Verificar leyenda externa para tres instancias y sus estilos comunes.
+
+    Comprueba identificadores/colores, guías de estilo y ausencia de
+    intersección entre la leyenda y los seis paneles después de renderizar.
+    Los estados auxiliares ya calculados bastan para revisar la distribución.
+    """
+    casos = {**comparacion_en_memoria, "PD+G digital": comparacion_en_memoria["PD+G"]}
+    figura = graficar_seguimientos(casos)
+    try:
+        # Una leyenda común evita ocultar los picos al comparar varios modos;
+        # las curvas mantienen sus datos y etiquetas individuales originales.
+        figura.canvas.draw()
+        assert len(figura.legends) == 1
+        leyenda = figura.legends[0]
+        etiquetas = [texto.get_text() for texto in leyenda.get_texts()]
+        assert etiquetas == [*casos, "Referencia articular", "Torque solicitado",
+                             "Torque aplicado", "Guías de límites"]
+        for indice, identificador in enumerate(casos):
+            curva = next(linea for linea in figura.axes[0].lines
+                         if linea.get_label() == identificador)
+            assert leyenda.legend_handles[indice].get_color() == curva.get_color()
+        caja = leyenda.get_window_extent(figura.canvas.get_renderer())
+        for eje in figura.axes:
+            assert eje.get_legend() is None
+            assert not caja.overlaps(eje.get_window_extent())
+        assert figura.bbox.contains(caja.x0, caja.y0)
+        assert figura.bbox.contains(caja.x1, caja.y1)
+    finally:
+        plt.close(figura)

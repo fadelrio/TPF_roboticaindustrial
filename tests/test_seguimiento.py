@@ -31,11 +31,11 @@ def comparaciones(dinamica_control: Dinamica) -> dict:
     """
     resultados = {}
     controladores = [ControladorPD("PD"), ControladorPD("PD+G", gravedad=True)]
-    for nombre in ESCENARIOS_CONTROL:
-        if nombre != "estabilizacion":
-            # Cada dirección comienza en el mismo reposo de referencia para
-            # ambos controladores, sin alterar ganancias ni parámetros físicos.
-            resultados[nombre] = comparar_continuo(dinamica_control, nombre, controladores)[nombre]
+    for nombre in ("abajo_arriba", "arriba_abajo", "extremos", "extremos_opuestos",
+                   "eje1", "eje2", "nulo_horizontal"):
+        # Conservar los siete casos de etapa 6 evita duplicar los pares nuevos
+        # que se verifican en la validación final de etapa 7.
+        resultados[nombre] = comparar_continuo(dinamica_control, nombre, controladores)[nombre]
     target = np.array([np.pi / 2, 0])
     for signo1, signo2 in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
         nombre = f"recuperacion_{signo1}_{signo2}"

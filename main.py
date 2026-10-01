@@ -1,4 +1,4 @@
-"""Diagnóstico, movimiento libre y comparación del control continuo del 2R."""
+"""Diagnóstico y comparaciones del 2R con control continuo y digital."""
 
 import argparse
 
@@ -13,7 +13,8 @@ from pendulo.modelo import (crear_robot, crear_robot_actuado,
 from pendulo.parametros import ACTUADORES, BARRAS, Friccion
 from pendulo.simulacion import medir_seguimiento, simular_libre, simular_seguimiento
 from pendulo.trayectorias import TrayectoriaQuintica
-from pendulo.visualizacion import crear_animacion, graficar_resultado, graficar_seguimientos
+from pendulo.visualizacion import (crear_animacion, crear_animacion_comparada,
+                                   graficar_resultado, graficar_seguimientos)
 
 
 # Estos escenarios conservan las condiciones reproducibles de la etapa 4.
@@ -38,6 +39,16 @@ ESCENARIOS_CONTROL = {
                        "q0": (np.pi / 2 + np.deg2rad(5), np.deg2rad(5))},
 }
 
+# Pares interiores y cercanos a los extremos, sin azar ni envoltura angular.
+# Sus fracciones de pi permiten repetir exactamente los casos de etapa 7.
+ESCENARIOS_ETAPA7 = {
+    "interior_a": {"qi": (-3 * np.pi / 4, np.pi / 5), "qf": (np.pi / 6, -2 * np.pi / 3)},
+    "interior_b": {"qi": (np.pi / 3, -np.pi / 2), "qf": (-np.pi / 4, 3 * np.pi / 4)},
+    "borde": {"qi": (np.pi - np.pi / 180, -np.pi + np.pi / 180),
+              "qf": (-np.pi + np.pi / 180, np.pi - np.pi / 180)},
+}
+ESCENARIOS_CONTROL.update(ESCENARIOS_ETAPA7)
+
 
 def comparar_continuo(
     dinamica: Dinamica, escenario: str, controladores: list[ControladorPD],
@@ -50,24 +61,80 @@ def comparar_continuo(
     heredando q y qd reales finales de la ida y manteniendo 1 s en cada destino.
     Los tiempos de cada resultado se expresan desde el inicio de su tramo.
     """
+    # Esta entrada conserva los nombres y el modo de las comparaciones
+    # anteriores; la implementación común también permite elegir digital.
+    return comparar_control(dinamica, escenario, controladores, friccion)
+
+
+def comparar_control(
+    dinamica: Dinamica, escenario: str, controladores: list[ControladorPD],
+    friccion: Friccion = Friccion(), modos: tuple[str, ...] = ("continuo",),
+    periodo: float = 0.001,
+) -> dict:
+    """Comparar instancias y modos con la misma referencia, planta y fricción.
+
+    Devuelve {tramo: {identificador: ResultadoSeguimiento}}. Si se compara
+    más de un modo, el identificador incluye modo y período digital. Cada
+    ida-vuelta hereda su propio estado real; los tiempos se reinician por
+    tramo. Las ganancias de cada instancia permanecen independientes.
+    """
     resultados = {}
     nombres = [controlador.nombre for controlador in controladores]
     if len(nombres) != len(set(nombres)):
         raise ValueError("Los controladores de una comparación deben tener nombres distintos")
     for controlador in controladores:
-        tramos = ["abajo_arriba", "arriba_abajo"] if escenario == "ida_vuelta" else [escenario]
-        anterior = None
-        for tramo in tramos:
-            caso = ESCENARIOS_CONTROL[tramo]
-            trayectoria = TrayectoriaQuintica(caso["qi"], caso["qf"])
-            q0, qd0 = caso.get("q0"), None
-            if anterior is not None:
-                # Continuar desde el estado obtenido conserva el error residual
-                # y la velocidad física, sin reiniciar artificialmente la planta.
-                q0, qd0 = anterior.simulacion.q[-1], anterior.simulacion.qd[-1]
-            anterior = simular_seguimiento(dinamica, trayectoria, controlador,
-                                          q0=q0, qd0=qd0, friccion=friccion)
-            resultados.setdefault(tramo, {})[controlador.nombre] = anterior
+        for modo in modos:
+            etiqueta = modo if modo == "continuo" else f"digital {1000 * periodo:g} ms"
+            identificador = (controlador.nombre if len(modos) == 1 else
+                             f"{controlador.nombre} — {etiqueta}")
+            tramos = ["abajo_arriba", "arriba_abajo"] if escenario == "ida_vuelta" else [escenario]
+            anterior = None
+            for tramo in tramos:
+                caso = ESCENARIOS_CONTROL[tramo]
+                trayectoria = TrayectoriaQuintica(caso["qi"], caso["qf"])
+                q0, qd0 = caso.get("q0"), None
+                if anterior is not None:
+                    # Cada combinación hereda su estado, incluyendo velocidad
+                    # residual. No comparte finales con otras simulaciones.
+                    q0, qd0 = anterior.simulacion.q[-1], anterior.simulacion.qd[-1]
+                anterior = simular_seguimiento(
+                    dinamica, trayectoria, controlador, q0=q0, qd0=qd0,
+                    friccion=friccion, modo=modo, periodo=periodo)
+                resultados.setdefault(tramo, {})[identificador] = anterior
+    return resultados
+
+
+def comparar_variantes(
+    dinamica: Dinamica, escenario: str, controladores: list[ControladorPD],
+    friccion: Friccion, modos: tuple[str, ...], periodo: float,
+    barrido: str = "ninguno",
+) -> dict:
+    """Reunir resultados del caso elegido o de un barrido reproducible.
+
+    ``barrido='friccion'`` recorre escalas 0, 0.5, 1 y 2 con los modos elegidos.
+    ``barrido='periodo'`` compara continuo y digitales de 0.5, 1, 5, 10 y 20 ms,
+    manteniendo planta, ganancias y fricción. Todos comparten referencia y
+    grilla de salida, por lo que pueden dibujarse y animarse simultáneamente.
+    """
+    if barrido == "ninguno":
+        return comparar_control(dinamica, escenario, controladores, friccion, modos, periodo)
+    resultados = {}
+    variantes = [0.0, 0.5, 1.0, 2.0] if barrido == "friccion" else [0.0005, 0.001, 0.005, 0.01, 0.02]
+    if barrido == "periodo":
+        # El continuo se calcula una sola vez como referencia común del
+        # barrido; no se repite una integración idéntica por cada período.
+        base = comparar_control(dinamica, escenario, controladores, friccion)
+        resultados = {tramo: {f"{nombre} — continuo": r for nombre, r in casos.items()}
+                      for tramo, casos in base.items()}
+    for valor in variantes:
+        f = Friccion(escala=valor) if barrido == "friccion" else friccion
+        seleccion = modos if barrido == "friccion" else ("digital",)
+        p = periodo if barrido == "friccion" else valor
+        comparaciones = comparar_control(dinamica, escenario, controladores, f, seleccion, p)
+        etiqueta = f"fricción ×{valor:g}" if barrido == "friccion" else f"digital {1000 * valor:g} ms"
+        for tramo, casos in comparaciones.items():
+            resultados.setdefault(tramo, {}).update(
+                {f"{nombre} — {etiqueta}": r for nombre, r in casos.items()})
     return resultados
 
 
@@ -84,6 +151,12 @@ def informar_seguimiento(resultado, recuperacion: bool = False) -> None:
     print(f"Controlador: {resultado.controlador.nombre}; "
           f"T [s]={resultado.trayectoria.duracion:.12g}; "
           f"final [s]={resultado.simulacion.t[-1]:.12g}")
+    periodo = "" if resultado.periodo is None else f"; período [s]={resultado.periodo:g}"
+    print(f"Modo: {resultado.modo}{periodo}")
+    if resultado.tiempos_control is not None:
+        # Contar actualizaciones explícitas distingue muestreo de control
+        # de la grilla común donde se guardan estados y torques mantenidos.
+        print(f"Actualizaciones digitales: {len(resultado.tiempos_control)}")
     print(f"Error máximo/final por eje [°]: {m['error_maximo_grados']} / {m['error_final_grados']}")
     print(f"Velocidad final [rad/s]: {m['velocidad_final']}")
     if recuperacion:
@@ -117,6 +190,8 @@ def main() -> None:
     ``--friccion`` permite elegir escala 0, 0.5, 1 o 2 explícitamente.
     ``--control`` selecciona libre, PD, PD con gravedad o comparación;
     ``--escenario`` elige una referencia controlada o una ida y vuelta.
+    ``--modo`` elige continuo, digital o comparación; ``--periodo`` está
+    en segundos. ``--barrido`` compara fricciones o períodos reproducibles.
     """
     # Las opciones seleccionan escenarios concretos y permiten ejecutar el
     # mismo programa en el IDE o en verificaciones sin interfaz gráfica.
@@ -130,7 +205,15 @@ def main() -> None:
                         default="libre")
     parser.add_argument("--escenario", choices=[*ESCENARIOS_CONTROL, "ida_vuelta"],
                         default="abajo_arriba")
+    parser.add_argument("--modo", choices=["continuo", "digital", "comparar"], default="continuo")
+    parser.add_argument("--periodo", type=float, default=0.001, help="Período digital en segundos")
+    parser.add_argument("--barrido", choices=["ninguno", "friccion", "periodo"], default="ninguno",
+                        help="Fricción usa --modo; período compara continuo y cinco períodos digitales")
     opciones = parser.parse_args()
+    if not np.isfinite(opciones.periodo) or opciones.periodo <= 0:
+        parser.error("El período digital debe ser positivo y finito")
+    if opciones.control == "libre" and (opciones.modo != "continuo" or opciones.barrido != "ninguno"):
+        parser.error("Seleccionar --control pd, pd_gravedad o comparar para usar modos o barridos")
     # Conservar el diagnóstico inicial permite comprobar el entorno usado.
     resultado = verificar_entorno()
     print("Etapa 1 — Diagnóstico del entorno")
@@ -225,26 +308,29 @@ def main() -> None:
 
     if opciones.control != "libre":
         print("\nEtapa 6 — Trayectorias y control continuo")
+        print("\nEtapa 7 — Control digital y comparación completa")
         controladores = []
         if opciones.control in ("pd", "comparar"):
             controladores.append(ControladorPD("PD"))
         if opciones.control in ("pd_gravedad", "comparar"):
             controladores.append(ControladorPD("PD+G", gravedad=True))
-        comparaciones = comparar_continuo(dinamica, opciones.escenario, controladores, friccion)
+        modos = ("continuo", "digital") if opciones.modo == "comparar" else (opciones.modo,)
+        comparaciones = comparar_variantes(
+            dinamica, opciones.escenario, controladores, friccion, modos,
+            opciones.periodo, opciones.barrido)
         figuras, animaciones = [], []
         for tramo, resultados in comparaciones.items():
             print(f"\nEscenario: {tramo}")
             recuperacion = tramo == "estabilizacion"
-            for resultado_control in resultados.values():
+            for identificador, resultado_control in resultados.items():
+                print(f"Comparación: {identificador}")
                 informar_seguimiento(resultado_control, recuperacion)
             if not opciones.sin_graficos:
-                # La comparación usa resultados calculados. En esta etapa se
-                # reproduce una instancia; la animación simultánea queda en 7.
+                # Todos los estados se reproducen con un único reloj y los
+                # mismos colores que la comparación, sin otra integración.
                 figuras.append(graficar_seguimientos(
                     resultados, tramo, limite_error=0.2 if recuperacion else 2.0))
-                elegido = resultados.get("PD+G", next(iter(resultados.values())))
-                figura, animacion = crear_animacion(
-                    elegido.simulacion, f"{tramo} — {elegido.controlador.nombre}", longitudes)
+                figura, animacion = crear_animacion_comparada(resultados, tramo, longitudes)
                 figuras.append(figura)
                 animaciones.append(animacion)
         if not opciones.sin_graficos:

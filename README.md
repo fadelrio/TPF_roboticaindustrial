@@ -2,9 +2,10 @@
 
 ## Estado
 
-Están completadas las **etapas 1 a 6: entorno, modelo mecánico, cinemática,
+Están completadas las **etapas 1 a 7: entorno, modelo mecánico, cinemática,
 dinámica propia, integración, gráficos, animación, actuadores, rozamiento,
-trayectorias y control continuo**. La etapa 7 requiere autorización por separado.
+trayectorias, control continuo y digital, comparación y animación simultánea**.
+La primera versión acordada queda implementada.
 El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
@@ -26,6 +27,10 @@ python3.12 -m venv .venv
 .venv/bin/python main.py --control comparar --escenario ida_vuelta
 .venv/bin/python main.py --control pd_gravedad --escenario estabilizacion
 .venv/bin/python main.py --control comparar --escenario extremos_opuestos --sin-graficos
+.venv/bin/python main.py --control comparar --modo comparar --escenario abajo_arriba
+.venv/bin/python main.py --control pd_gravedad --modo digital --periodo 0.001 --escenario interior_a
+.venv/bin/python main.py --control pd_gravedad --modo comparar --barrido friccion --escenario extremos_opuestos
+.venv/bin/python main.py --control pd_gravedad --barrido periodo --escenario estabilizacion --sin-graficos
 .venv/bin/python -m pytest -v
 ```
 
@@ -43,11 +48,19 @@ todas las ventanas.
 `--control` permite `libre` (por defecto), `pd`, `pd_gravedad` o `comparar`.
 En control continuo, `--escenario` selecciona `abajo_arriba`, `arriba_abajo`,
 `extremos`, `extremos_opuestos`, `eje1`, `eje2`, `nulo_horizontal`,
-`estabilizacion` o `ida_vuelta`. Los gráficos comparan las instancias calculadas;
-la animación reproduce PD+G cuando está disponible y PD en caso contrario.
-La ida-vuelta conserva el estado físico entre tramos y crea una figura de
-comparación y una animación por tramo. La reproducción simultánea de varias
-instancias y el control digital quedan para la etapa 7.
+`estabilizacion`, `ida_vuelta`, `interior_a`, `interior_b` o `borde`.
+`--modo` permite `continuo` (por defecto), `digital` o `comparar`; el último
+compara ambos modos con idénticas condiciones. `--periodo` está en segundos y
+vale `0.001` por defecto. Los gráficos y la animación simultánea muestran todas
+las instancias calculadas, con nombres y colores comunes.
+La ida-vuelta conserva el estado físico propio de cada combinación entre tramos
+y crea una figura de comparación y una animación por tramo.
+
+`--barrido friccion` compara escalas 0, 0.5, 1 y 2 usando los modos seleccionados.
+`--barrido periodo` compara un continuo y digitales de 0.5, 1, 5, 10 y 20 ms,
+independientemente de `--modo`, con la fricción elegida. No repite el continuo
+por cada período. Los barridos requieren seleccionar un controlador con
+`--control`; el modo libre sigue disponible por defecto.
 
 La ventana de animación incluye **«Volver a reproducir»**. Se puede pulsar
 durante el movimiento o al terminar para reiniciar desde t=0, usando los
@@ -977,8 +990,245 @@ Se mantienen fricción supuesta, eficiencia máxima, medición ideal y ausencia
 de electrónica, juego, elasticidad y efectos térmicos. Las estimaciones de motor
 en frenado no validan pérdidas ni regeneración. El control digital de 1 ms,
 la sensibilidad a otros períodos y fricciones, más pares reproducibles y la
-animación simultánea se implementarán en la etapa 7 tras autorización.
+animación simultánea se documentan en la etapa 7 siguiente.
 La etapa 6 queda completada con los resultados y limitaciones anteriores.
+
+## Control digital y comparación completa: etapa 7
+
+### Muestreo, integración y trazabilidad
+
+`simular_seguimiento(..., modo='digital', periodo=0.001)` usa el mismo
+modelo, trayectoria, ganancias, límites y fricción que el continuo. En
+`t_k=k·Ts`, desde t=0, mide q/qd reales, evalúa la referencia y calcula el
+pedido PD o PD+G una sola vez. Satura ese pedido y mantiene ambos torques
+constantes hasta la siguiente actualización. Entre muestras integra
+
+\[
+M(q)\ddot q=\tau_{aplicado,k}-C(q,\dot q)\dot q-G(q)-f(\dot q)
+\]
+
+con RK45 a `rtol=1e-7`, `atol=1e-9`. La fricción responde continuamente
+a la velocidad real, incluso con torque retenido. Cada intervalo empieza
+desde el estado final real del anterior; RK45 termina exactamente en la
+frontera antes de actualizar el controlador. Esto evita atravesar el salto
+de torque usando una sola integración con un controlador dependiente de sus
+llamadas internas. No añade retraso de cómputo, ruido ni cuantización de sensores.
+
+El último intervalo se acorta si el horizonte no es múltiplo de Ts. No
+actualiza en el tiempo final, porque no queda otro intervalo que accionar;
+su registro conserva el último torque retenido. Los registros son por la
+derecha en las fronteras anteriores. La salida sigue cada 1 ms, independiente
+de Ts: la interpolación densa de RK45 evalúa las muestras dentro de cada
+intervalo, sin interpolar los saltos de torque. Los intervalos sin muestras
+de salida se integran igualmente y conservan su actualización de control.
+
+`ResultadoSeguimiento` agrega `modo`, `periodo` y las trazas opcionales
+`tiempos_control`, `torque_control_solicitado`, `torque_control_aplicado`.
+Las trazas digitales registran todos los eventos, en s y N·m; el continuo
+conserva None en esos campos. Los máximos de torque pedido/aplicado y la
+estimación de torque de motor usan **todos los eventos digitales**, incluso
+cuando Ts es menor al paso de salida. Error, velocidad, rpm, potencia y
+porcentaje de muestras saturadas se calculan en la grilla de resultados.
+Esos máximos no demuestran el extremo exacto entre muestras; el porcentaje
+no se presenta como duración exacta de saturación.
+
+La referencia almacenada mantiene qd/qdd analíticas en la grilla común,
+también entre actualizaciones digitales. Se utiliza para comparar el estado
+con la trayectoria prevista; el controlador digital sólo la evalúa en t_k.
+La planta no recorta velocidades ni envuelve ángulos.
+
+### Comparaciones y reproducción simultánea
+
+`comparar_control` ejecuta las instancias elegidas en uno o ambos modos,
+con condiciones comunes; `comparar_continuo` conserva la entrada anterior.
+`comparar_variantes` reúne un caso normal o los barridos de fricción/período.
+Los resultados se identifican por controlador, modo y variante. Cada
+combinación de ida-vuelta hereda su propio q/qd final, sin compartir estados
+con otras combinaciones ni reiniciar el regreso artificialmente.
+
+Cada `ControladorPD` conserva nombre y ganancias independientes; varias
+instancias pueden incorporarse a la lista de controladores de `main.py`.
+La comparación nominal usa las dos leyes y ganancias aprobadas. Reutilizar
+una misma ley entre modos no comparte una evolución interna: el controlador
+no almacena estado ni modifica ganancias al calcular torque.
+
+`crear_animacion_comparada` dibuja una polilínea por resultado sobre los
+mismos ejes XY. Exige grillas temporales exactamente iguales, usa un único
+índice y reloj y conserva colores/identificadores de los gráficos. Rechaza
+grillas incompatibles en vez de aparentar simultaneidad mediante remuestreo.
+Incluye el último fotograma y mantiene allí la imagen. «Volver a reproducir»
+detiene el temporizador anterior y crea otra reproducción sobre los mismos
+datos y artistas; la figura retiene el botón y la animación vigente.
+Retorna `(figura, primera_animacion)`, como la animación simple existente.
+
+Los gráficos con tres o más resultados usan una leyenda común fuera de los
+seis paneles, para conservar visibles picos y errores. La reproducción usa
+resultados ya calculados y su temporizador gráfico no garantiza velocidad
+real de ejecución. No se exportan datos, imágenes ni videos automáticamente.
+
+### Condiciones y resultados nominales
+
+Se repiten los ocho recorridos de etapa 6, las cuatro perturbaciones de ±5°
+y tres pares nuevos, con **ambas leyes y ambos modos**, mismo modelo actuado,
+fricción nominal, ganancias originales y permanencia de 1 s. La fixture
+reutiliza resultados entre comprobaciones y barridos: calcula 80 combinaciones
+distintas y agrega una integración digital estricta. No hay azar.
+
+| Par nuevo | qi → qf [rad] | T [s] |
+|---|---|---:|
+| interior_a | (−3π/4,π/5) → (π/6,−2π/3) | 2 |
+| interior_b | (π/3,−π/2) → (−π/4,3π/4) | 2.45436926062 |
+| borde | (π−π/180,−π+π/180) → (−π+π/180,π−π/180) | 3.90517420134 |
+
+Magnitudes por eje `(e1,e2)`; las tablas redondean, las comprobaciones usan
+los valores completos. PD+G cumple máximo ≤2° y final ≤0.2° en los once
+recorridos **por modo**. Los resultados continuos originales están en etapa 6.
+
+| Recorrido | PD digital máximo [°] | PD digital final [°] | PD+G digital máximo [°] | PD+G digital final [°] |
+|---|---|---|---|---|
+| abajo_arriba | (2.264104,1.145624) | (0.000098,0.000712) | (0.448111,0.159840) | (0.000149,0.001425) |
+| arriba_abajo | (1.757825,1.145921) | (0.000141,0.001500) | (0.444789,0.158421) | (0.000148,0.001420) |
+| extremos | (2.264247,1.500364) | (1.415433,1.215308) | (0.446124,0.386311) | (0.000467,0.001240) |
+| extremos_opuestos | (2.262092,1.212932) | (1.415456,1.212932) | (0.345379,0.452250) | (0.000443,0.001135) |
+| eje1 | (2.164526,1.360309) | (0.274543,1.065663) | (0.421516,0.202318) | (0.000064,0.000837) |
+| eje2 | (1.991932,1.495621) | (1.415936,1.212877) | (0.044182,0.298975) | (0.000016,0.001188) |
+| nulo_horizontal | (2.021903,1.212143) | (2.021903,1.212141) | (0,0) | (0,0) |
+| vuelta_continuada | (1.757825,1.145921) | (0.000141,0.001500) | (0.444789,0.158420) | (0.000148,0.001420) |
+| interior_a | (1.720530,0.496701) | (1.504022,0.032330) | (0.383749,0.414541) | (0.000177,0.001226) |
+| interior_b | (1.814054,1.471826) | (1.196657,0.027183) | (0.199328,0.309767) | (0.000429,0.001175) |
+| borde | (1.746660,1.658600) | (1.415332,1.215203) | (0.341338,0.451815) | (0.000442,0.001135) |
+
+PD puro conserva sesgo por gravedad y cumple ambos umbrales sólo en
+arriba_abajo y vuelta_continuada; se informa como comparación. En los pares
+nuevos, PD+G continuo obtuvo máximos/finales: interior_a
+`(0.382374,0.414639)/(0.000178,0.001235)°`, interior_b
+`(0.199927,0.310350)/(0.000432,0.001184)°` y borde
+`(0.343519,0.451856)/(0.000446,0.001145)°`.
+
+| Máximo conjunto PD+G sobre once recorridos | Continuo | Digital 1 ms | Criterio o capacidad |
+|---|---|---|---|
+| Error máximo [°] | (0.446448,0.452205) | (0.448111,0.452250) | ≤(2,2) |
+| Error final [°] | (0.000471,0.001434) | (0.000467,0.001425) | ≤(0.2,0.2) después de 1 s |
+| Torque pedido/aplicado máximo [N·m] | (0.800254,0.145570) | (0.800264,0.145568) | (1.20,0.31); sin saturación nominal |
+| Torque ideal máximo [N·m] | (0.800067,0.145471) | (0.800067,0.145471) | (1.20,0.31) |
+| Velocidad real máxima [rad/s] | (3.011797,3.001004) | (3.012024,3.001098) | Contraste con rpm, sin recorte a la referencia |
+| Entrada máxima [rpm] | (1783.154,745.094) | (1783.288,745.118) | (10800,10000) |
+| Máximo abs(P) [W] | (2.408741,0.416219) | (2.408936,0.416265) | (6,12) de transmisión |
+
+La reserva de torque digital en esos casos es aproximadamente
+`(0.399736,0.164432) N·m`. Las estimaciones de motor con η máxima también
+cumplen: torque aproximadamente `(0.017443,0.006912) N·m`, frente a
+`(0.0322,0.0149) N·m`; potencia aproximadamente `(3.2553,0.5139) W`, frente
+a `(36.4173,16.8515) W` del punto nominal. Se conservan las limitaciones
+de selección de etapa 5, incluyendo eficiencia real y calentamiento desconocidos.
+
+En recuperación de ±5°, PD+G digital asienta en 0.176 s para signos iguales
+y 0.217 s para opuestos; el continuo, en 0.176 y 0.218 s. El error final
+digital es ≤`(2.537e-7,1.410e-6)°`. El pedido inicial máximo
+`(1.816053,0.454730) N·m` supera los límites; aplicado máximo
+`(1.20,0.31) N·m`. Las muestras saturadas digitales son
+`(0.399867,0.299900)%` para signos iguales y `(0.133289,0.066644)%`
+para opuestos. Los 5° iniciales se evalúan por recuperación, no como
+incumplimiento del máximo de seguimiento.
+
+### Sensibilidad al período y al rozamiento
+
+PD+G, fricción nominal, mismas condiciones de extremos_opuestos o
+recuperación (+5,+5). Sólo cambia Ts; no se ajustan ganancias.
+
+| Ts [ms] | Extremos opuestos: máximo [°] | Extremos opuestos: final [°] | Seguimiento | Recuperación: final [°] | Asentamiento [s] |
+|---:|---|---|---|---|---|
+| 0.5 | (0.344293,0.452221) | (0.000445,0.001140) | Cumple | (2.095e-7,8.679e-7) | 0.176 |
+| 1 | (0.345379,0.452250) | (0.000443,0.001135) | Cumple nominal | (2.079e-7,8.593e-7) | 0.176 |
+| 5 | (0.353527,0.452951) | (0.000429,0.001100) | Cumple en este caso | (1.972e-7,7.993e-7) | 0.176 |
+| 10 | (0.362363,0.455018) | (0.000414,0.001060) | Cumple en este caso | (0.003457,0.356670) | No alcanza el umbral en 3 s |
+| 20 | (2.009767,4.019261) | (0.000982,0.001536) | Incumple el máximo | (1.239987,5.998702) | No alcanza el umbral en 3 s |
+
+En extremos_opuestos a 20 ms, pedidos máximos `(3.132317,1.189986) N·m`,
+muestras saturadas `(17.04545,28.81494)%` y potencia absoluta máxima
+`(5.458502,2.262572) W`. Aunque el error final sea pequeño, no cumple el
+máximo de 2°. En recuperación a 10 ms el eje 2 termina fuera de 0.2°;
+a 20 ms alcanza 7.520595° máximos y saturaciones cercanas al 80% de
+las muestras. Son incumplimientos diagnósticos de períodos mayores, no
+resultados nominales aceptados ni razones para cambiar silenciosamente las ganancias.
+
+Los barridos de fricción usan PD+G en abajo_arriba y extremos_opuestos,
+ambos modos; sólo escalan B y Tc por 0, 0.5, 1 y 2. Las **16 combinaciones**
+observadas cumplen precisión, capacidad y pedido sin saturación. Máximos de
+error por eje, en grados:
+
+| Caso y modo | Nula | Media | Nominal | Doble |
+|---|---|---|---|---|
+| abajo_arriba continuo | (0.271492,0.188320) | (0.355390,0.176564) | (0.446448,0.159042) | (0.647739,0.127254) |
+| abajo_arriba digital 1 ms | (0.272783,0.189092) | (0.356878,0.177389) | (0.448111,0.159840) | (0.649566,0.127976) |
+| extremos_opuestos continuo | (0.110117,0.179148) | (0.224936,0.315490) | (0.343191,0.452205) | (0.585305,0.726607) |
+| extremos_opuestos digital 1 ms | (0.112124,0.179188) | (0.227104,0.315533) | (0.345379,0.452250) | (0.587410,0.726655) |
+
+Con fricción doble, error final abajo_arriba continuo/digital
+`(0.004097,0.010341)/(0.004090,0.010356)°`, y extremos_opuestos
+`(0.007933,0.017573)/(0.007902,0.017519)°`. La potencia perdida
+`qd·f` es no negativa en todas las muestras. No se supone monotonía
+del error: el eje 2 en abajo_arriba reduce su máximo al aumentar fricción.
+Son resultados de estos casos con fricción supuesta, sin validación experimental.
+
+### Informe de verificaciones y aceptación final
+
+Reproducción de las nuevas comprobaciones y de la suite completa:
+
+```bash
+.venv/bin/python -m pytest tests/test_digital.py tests/test_validacion_final.py tests/test_animacion_comparada.py tests/test_cli_digital.py tests/test_graficos_control.py -v -s
+.venv/bin/python -m pytest -v -s
+```
+
+La suite completa aprobó **159 casos en 205.58 s**: 61 nuevos y los 98
+previos. La validación física final reutiliza 80 resultados y emite sus
+métricas en consola (filas `VALIDACION`), además de un contraste estricto.
+Las funciones/métodos propios tienen docstrings y comentarios internos en español.
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Actualización digital y retención | Ts=7.3 ms, horizonte 3 s, salida 1 ms; interceptar controlador y entradas a cada solve_ivp | Una llamada por intervalo, fronteras exactas, q/qd continuos, última fracción, pedido/aplicado mantenidos | 411 actualizaciones, último t_k=2.993 s e intervalo final 7 ms; 3001 salidas; fronteras/retención exactas | Cumplida | Ts y salida no necesitan ser múltiplos; no se recalcula control dentro de RK45. |
+| Planta común y ausencia de recortes | Modelo actuado, Ts=4 s y horizonte 3 s; pedir (2,−1) N·m; q0=(π+0.2,−π−0.1) rad, qd0=(3.5,−3.2) rad/s; comparar con planta de torque constante | q/qd/E coincidentes a 1e-10 rad/1e-9 rad/s/1e-10 J; aplicado=(1.20,−0.31) N·m; estados iniciales intactos | Δq=0 rad, Δqd=6.94e-18 rad/s, ΔE=0 J; estados sin envolver/recortar | Cumplida | Aísla integración y saturación de la variación de control; el rango limita destinos, no el estado físico. |
+| Control más rápido que la salida | Ts=0.5 ms y salida 1 ms, incluyendo pedidos entre salidas | No perder intervalos ni picos de torque; actualizar 6000 veces | 6000 eventos/3001 salidas; trazas y métricas detectan pedidos/aplicaciones ausentes de la grilla | Cumplida | Los máximos de torque usan todos los eventos; estados y potencia conservan resolución de salida. |
+| Frontera derecha y exclusión de actualización final | Ts=1.5 s durante 3 s, salida cada 0.5 s; PD con perturbación inicial | Dos actualizaciones en 0/1.5 s; frontera usa segundo pedido; final conserva última aplicación | Dos llamadas y registros de frontera/final exactos | Cumplida | No se fabrica una actualización sin intervalo posterior. |
+| Seguimiento nominal en ambos modos | Ocho recorridos originales y tres pares nuevos; PD y PD+G, mismo modelo/ganancias/fricción; hold 1 s | PD+G máximo≤2°, final≤0.2°, pedido e ideal dentro de torque y capacidad de rpm/potencia | Once recorridos por modo cumplen; máximos y demandas de las tablas; ninguna saturación nominal | Cumplida | PD puro conserva incumplimientos de comparación; no se le impone la aceptación nominal. |
+| Recuperación digital y continua | Cuatro signos de ±5° en las juntas, qd0=0, referencia invertida nula, 3 s | Asentamiento en ±0.2° antes del final, permanencia posterior y torque aplicado dentro de límites | Digital asienta en 0.176/0.217 s; continuo 0.176/0.218 s; final digital≤1.410e-6°; saturación informada | Cumplida | La desviación inicial se evalúa por recuperación. |
+| Continuidad de ida-vuelta por combinación | Ambos modos/leyes, heredar final real; coordinación auxiliar con cuatro historias diferentes | Misma referencia, q/qd iniciales de regreso exactamente iguales a su propia ida | Igualdad exacta en las integraciones y en ocho llamadas auxiliares; ganancias/planta/fricción intactas | Cumplida | No hay reset artificial ni cruce de estados entre resultados. |
+| Aproximación digital al continuo | Extremos_opuestos PD+G, Ts=0.5/1 ms frente a continuo, misma grilla | Menor diferencia de q al reducir Ts en este caso; digital 1 ms a ≤0.1° del continuo | 0.5 ms: Δq=1.9870e-5 rad, Δqd=6.7828e-5 rad/s; 1 ms: 3.9459e-5 rad y 1.3732e-4 rad/s | Cumplida | La diferencia corresponde al muestreo/retención; no se extrapola monotonía global. |
+| Convergencia de integración digital | Extremos_opuestos de 1 ms, repetir rtol=1e-9/atol=1e-11, mismas condiciones | Δq≤1e-5 rad, Δqd≤1e-4 rad/s, Δτpedido≤1e-4 N·m; mantener precisión | Δq=1.5065e-11 rad, Δqd=1.2040e-9 rad/s, Δτ=2.0414e-10 N·m; 40250/57272 evaluaciones | Cumplida | Error numérico muy menor que las diferencias entre modos; contraste estricto no es solución exacta. |
+| Sensibilidad a Ts | Cinco períodos en extremos_opuestos y recuperación (+5,+5), ganancias fijas | Registrar evolución finita y mismo caso; diagnosticar capacidad/errores sin imponer éxito a Ts mayores | Seguimiento falla a 20 ms; recuperación falla a 10/20 ms, con valores de la tabla | Diagnóstico cumplido; especificaciones incumplidas en esos casos | Los períodos grandes deterioran el control; se conserva 1 ms nominal. |
+| Sensibilidad a fricción | Dos recorridos, dos modos, cuatro escalas; sólo cambia fricción | Resistencias disipativas y resultados comparables; reportar sensibilidad | 16 combinaciones dentro de umbrales/capacidad; qd·f≥0; error final máximo observado 0.017573° | Cumplida en los casos observados | Los coeficientes siguen siendo supuestos; no se afirma monotonía de todos los errores. |
+| Gráficos y leyenda común | Curvas auxiliares conocidas, dos/tres instancias, render Agg; caja de leyenda frente a paneles | Datos/colores/estilos correctos; leyenda externa no interseca paneles ni sale de figura | Seis casos gráficos aprobados; figuras reales de cuatro resultados inspeccionadas con curvas visibles | Cumplida | Las leyendas no ocultan los picos al comparar modos. |
+| Geometría, índices y reloj simultáneo | Tres robots auxiliares, tiempos hasta 105 ms, períodos gráficos 20/30/150 ms; contraste Toolbox | Geometría≤1e-12 m, tiempo común exacto, incluir final | Índices 0/20/40/60/80/100/105; 0/30/60/90/105; 0/105 respectivamente; geometrías y reloj correctos | Cumplida | Cada robot utiliza su propio estado para el mismo índice físico. |
+| Botón y datos originales | Clic durante/después, dos ciclos; bloquear integrador y comparar arrays originales | Detener timer anterior, crear nuevo, conservar artistas/datos; comienzo y final correctos | Dos repeticiones correctas; arrays iguales y cero llamadas al integrador | Cumplida | Animación simple y comparada usan el mismo mecanismo de reproducción. |
+| Ventanas y animación real | TkAgg; abajo_arriba, cuatro resultados (dos leyes×dos modos), 3 s; cuadros en 0/1.5/3 s y dos ciclos reales | Geometría≤1e-12 m, reloj común, reinicios, fin en 3 s; sin reintegración ni mutaciones | Ambos ciclos llegan a 3.000 s; clic durante y después funciona; estados/torques/referencias intactos | Cumplida | La verificación usa temporizador real, además de los tests sin ventana. |
+| CLI, nombres y barridos | Subprocesos: comparación interior_a y digital horizontal con Ts=7.3 ms; coordinación auxiliar de barridos | Código 0, cuatro informes únicos; retención en todas las salidas; variantes completas, continuo una sola vez; sin gráficos/exportación al pedirlo | Cuatro informes correctos; PD+G aceptado; 411 eventos del caso horizontal; barridos de 4 escalas y 5 períodos más continuo, ordenados | Cumplida | La entrada permite reproducir nominales y diagnósticos sin editar el modelo. |
+| Regresión y documentación | Suite completa, inspección de docstrings/comentarios y git diff --check | Conservar etapas previas; fuentes documentadas y diff limpio | 159 casos aprobados; 166 funciones/métodos documentados en 25 archivos; diff limpio | Cumplida | No se modificaron dependencias ni parámetros físicos durante la etapa. |
+
+### Análisis conjunto y alcance de la primera versión
+
+El seguimiento PD+G continuo y digital de 1 ms cumple las especificaciones
+nominales en los once recorridos comprobados, incluyendo regreso físico y
+pares interiores/cercanos a los extremos. Recupera las perturbaciones iniciales
+de 5° y la demanda de selección cabe en los actuadores aprobados. Las
+referencias empiezan y terminan en reposo; el estado real y sus velocidades
+residuales se registran, sin imponer artificialmente reposo o posición final.
+
+Los períodos grandes pueden producir oscilaciones y saturación aun con las
+mismas ganancias: a 10/20 ms falla la recuperación y a 20 ms falla el máximo
+del recorrido extremo. El período aprobado de 1 ms conserva margen en los
+casos verificados. La fricción cambia el error y la demanda, pero las escalas
+ensayadas siguen dentro de criterios en esos dos recorridos. No se cambiaron
+ganancias ni componentes para esconder los incumplimientos de sensibilidad.
+
+La primera versión acordada queda implementada. Las pruebas aportan evidencia
+numérica para los casos y horizontes indicados: no demuestran todo el rango
+ni garantizan comportamiento de una construcción real. Persisten distribución
+de masa equivalente, fricción supuesta, transmisión rígida, medición ideal,
+eficiencia máxima de selección y ausencia de electrónica, retrasos adicionales,
+cuantización, juego, elasticidad, fricción estática y modelo térmico. No se
+certifica regeneración eléctrica ni calentamiento. Control cartesiano, fuerzas,
+adaptación y material de presentación siguen fuera del alcance acordado.
 
 ## Diseño aprobado del proyecto
 

@@ -93,6 +93,41 @@ def limitar_torque(
     return np.clip(np.asarray(solicitado, dtype=float), -np.asarray(limites), limites)
 
 
+def _derivada_planta(
+    dinamica: Dinamica, estado: np.ndarray, aplicado: np.ndarray,
+    perdida: np.ndarray,
+) -> np.ndarray:
+    """Evaluar [qd,qdd] con estado (4,) y torques (2,) en unidades SI.
+
+    Resuelve M·qdd=τaplicado−C·qd−G−f. La integración continua y cada
+    intervalo digital utilizan esta misma ecuación, sin modificar el estado.
+    """
+    q, v = estado[:2], estado[2:]
+    # Resolver el sistema lineal evita formar una inversa explícita de M.
+    aceleracion = np.linalg.solve(
+        dinamica.M(q), aplicado - dinamica.C(q, v) @ v - dinamica.G(q) - perdida)
+    return np.concatenate([v, aceleracion])
+
+
+def _crear_resultado_planta(
+    dinamica: Dinamica, tiempos: np.ndarray, estados: np.ndarray,
+    evaluaciones: int, registros: np.ndarray,
+) -> ResultadoSimulacion:
+    """Construir estados, energías y torques sobre la misma grilla de salida.
+
+    ``estados`` tiene forma (n,4), con q y qd en SI. ``registros`` tiene
+    forma (n,3,2), con torque solicitado, aplicado y de rozamiento en N·m.
+    Las energías se calculan una vez, después de integrar todo el recorrido.
+    """
+    q, v = estados[:, :2].copy(), estados[:, 2:].copy()
+    # Esta ruta común evita recalcular energías y crear resultados parciales
+    # miles de veces cuando el controlador actualiza cada milisegundo.
+    cinetica = np.array([0.5 * vi @ dinamica.M(qi) @ vi for qi, vi in zip(q, v)])
+    potencial = np.array([dinamica.potencial(qi) for qi in q])
+    return ResultadoSimulacion(tiempos.copy(), q, v, cinetica, potencial, evaluaciones,
+                              registros[:, 0], registros[:, 1], registros[:, 2])
+
+
 def simular_planta(
     dinamica: Dinamica,
     q0: np.ndarray,
@@ -131,26 +166,81 @@ def simular_planta(
         Resuelve el sistema lineal de la planta usando el torque saturado,
         los torques conservativos y el rozamiento articular suave.
         """
-        q, v = estado[:2], estado[2:]
-        _, aplicado, perdida = torques(t, q, v)
-        # Resolver el sistema lineal evita formar una inversa explícita de M.
-        aceleracion = np.linalg.solve(
-            dinamica.M(q), aplicado - dinamica.C(q, v) @ v - dinamica.G(q) - perdida)
-        return np.concatenate([v, aceleracion])
+        _, aplicado, perdida = torques(t, estado[:2], estado[2:])
+        # La ecuación también se usa cuando el accionamiento mantiene torque.
+        return _derivada_planta(dinamica, estado, aplicado, perdida)
 
     solucion = solve_ivp(derivada, (0.0, duracion), inicial, method="RK45",
                         t_eval=tiempos, rtol=rtol, atol=atol)
     if not solucion.success:
         raise RuntimeError(f"Falló la integración de la planta: {solucion.message}")
-    q, v = solucion.y[:2].T.copy(), solucion.y[2:].T.copy()
+    estados = solucion.y.T
+    # Registrar en los mismos tiempos no fija los pasos internos de RK45.
+    registros = np.array([torques(ti, estado[:2], estado[2:])
+                         for ti, estado in zip(solucion.t, estados)])
+    return _crear_resultado_planta(dinamica, solucion.t, estados, solucion.nfev, registros)
 
-    # Las energías corresponden a las mismas muestras usadas por gráficos y
-    # animación, no a otro recorrido ni a los pasos internos del integrador.
-    cinetica = np.array([0.5 * vi @ dinamica.M(qi) @ vi for qi, vi in zip(q, v)])
-    potencial = np.array([dinamica.potencial(qi) for qi in q])
-    registros = np.array([torques(ti, qi, vi) for ti, qi, vi in zip(solucion.t, q, v)])
-    return ResultadoSimulacion(solucion.t.copy(), q, v, cinetica, potencial, solucion.nfev,
-                              registros[:, 0], registros[:, 1], registros[:, 2])
+
+def _simular_digital(
+    dinamica: Dinamica, q0: np.ndarray, qd0: np.ndarray, duracion: float,
+    solicitar: Callable[[float, np.ndarray, np.ndarray], np.ndarray],
+    friccion: Friccion | None, periodo: float, paso_salida: float,
+    rtol: float, atol: float,
+) -> tuple[ResultadoSimulacion, np.ndarray, np.ndarray, np.ndarray]:
+    """Integrar control muestreado con retención de torque entre t_k=k·Ts.
+
+    Actualiza solicitud y saturación una vez al comenzar cada intervalo,
+    incluyendo t=0 y excluyendo el tiempo final. RK45 se reinicia desde
+    el estado real de la frontera, con rozamiento evaluado continuamente.
+    La salida conserva una grilla independiente del muestreo de control.
+    Retorna el resultado y las trazas de tiempos, solicitud y aplicación.
+    """
+    tiempos = grilla_tiempo(duracion, paso_salida)
+    fronteras = grilla_tiempo(duracion, periodo)
+    estado = np.concatenate([np.asarray(q0, dtype=float), np.asarray(qd0, dtype=float)])
+    estados = np.empty((len(tiempos), 4))
+    pedidos_salida = np.empty((len(tiempos), 2))
+    aplicados_salida = np.empty((len(tiempos), 2))
+    pedidos_control, aplicados_control = [], []
+    evaluaciones = 0
+    for indice, (inicio, final) in enumerate(zip(fronteras[:-1], fronteras[1:])):
+        # Medir únicamente el estado real en t_k. Copiar el pedido evita
+        # compartir una solicitud reutilizada por un controlador externo.
+        pedido = np.asarray(solicitar(inicio, estado[:2], estado[2:]), dtype=float).copy()
+        aplicado = limitar_torque(pedido)
+        pedidos_control.append(pedido)
+        aplicados_control.append(aplicado)
+
+        def derivada(t: float, actual: np.ndarray) -> np.ndarray:
+            """Evaluar la planta con torque retenido y fricción instantánea."""
+            # El controlador no interviene aquí: la resistencia conserva la
+            # velocidad actual de cada paso interno, no la última muestreada.
+            perdida = np.zeros(2) if friccion is None else friccion.torque(actual[2:])
+            return _derivada_planta(dinamica, actual, aplicado, perdida)
+
+        solucion = solve_ivp(derivada, (inicio, final), estado, method="RK45",
+                            dense_output=True, rtol=rtol, atol=atol)
+        if not solucion.success:
+            raise RuntimeError(f"Falló la integración digital: {solucion.message}")
+        evaluaciones += solucion.nfev
+        # La interpolación densa de RK45 recoge las muestras dentro de cada
+        # intervalo sin exigir que Ts sea múltiplo del paso de salida.
+        desde = np.searchsorted(tiempos, inicio, side="left")
+        ultimo = indice == len(fronteras) - 2
+        hasta = np.searchsorted(tiempos, final, side="right" if ultimo else "left")
+        if hasta > desde:
+            estados[desde:hasta] = solucion.sol(tiempos[desde:hasta]).T
+            pedidos_salida[desde:hasta] = pedido
+            aplicados_salida[desde:hasta] = aplicado
+        # Conservar el extremo integrado antes de actualizar en la próxima
+        # frontera. El tiempo final no provoca una nueva llamada de control.
+        estado = solucion.y[:, -1].copy()
+    estados[-1] = estado
+    perdidas = np.array([np.zeros(2) if friccion is None else friccion.torque(v)
+                        for v in estados[:, 2:]])
+    registros = np.stack([pedidos_salida, aplicados_salida, perdidas], axis=1)
+    resultado = _crear_resultado_planta(dinamica, tiempos, estados, evaluaciones, registros)
+    return resultado, fronteras[:-1].copy(), np.array(pedidos_control), np.array(aplicados_control)
 
 
 @dataclass
@@ -161,6 +251,10 @@ class ResultadoSeguimiento:
     q_d, qd_d y qdd_d son arrays (n,2) en rad, rad/s y rad/s². El torque
     de referencia (n,2), en N·m, es la demanda ideal de esa trayectoria,
     incluyendo fricción; no se utiliza como anticipación en el controlador.
+    ``modo`` distingue continuo y digital. ``periodo`` es Ts en s solo para
+    digital; en continuo es None. Las trazas opcionales contienen los tiempos
+    de actualización (n_control,) y torques pedido/aplicado (n_control,2),
+    excluyendo el tiempo final, donde se conserva el último torque retenido.
     """
 
     simulacion: ResultadoSimulacion
@@ -170,6 +264,11 @@ class ResultadoSeguimiento:
     qd_d: np.ndarray
     qdd_d: np.ndarray
     torque_referencia: np.ndarray
+    modo: str = "continuo"
+    periodo: float | None = None
+    tiempos_control: np.ndarray | None = None
+    torque_control_solicitado: np.ndarray | None = None
+    torque_control_aplicado: np.ndarray | None = None
 
     @property
     def error(self) -> np.ndarray:
@@ -189,29 +288,46 @@ def simular_seguimiento(
     paso_salida: float = 0.001,
     rtol: float = 1e-7,
     atol: float = 1e-9,
+    modo: str = "continuo",
+    periodo: float = 0.001,
 ) -> ResultadoSeguimiento:
-    """Integrar control continuo durante la quintica y la permanencia final.
+    """Integrar control continuo o digital durante movimiento y permanencia.
 
     Por defecto parte de qi y reposo. q0/qd0 permiten una perturbación o
     continuar desde el estado real de un tramo anterior, en rad y rad/s.
     ``permanencia`` debe ser al menos 1 s. La planta conserva RK45, límites
-    físicos y grilla de salida; el controlador se evalúa en cada llamada
-    interna, sin muestreo digital ni anticipación del torque de referencia.
+    físicos y grilla de salida. En ``modo='continuo'`` el controlador se
+    evalúa en cada llamada interna. En ``modo='digital'`` mide el estado y
+    actualiza cada ``periodo`` s desde t=0, manteniendo torque hasta la
+    próxima muestra. No actualiza al finalizar ni anticipa torque ideal.
     """
     if permanencia < 1.0:
         raise ValueError("La permanencia final debe ser de al menos 1 s")
+    if modo not in ("continuo", "digital"):
+        raise ValueError("El modo debe ser 'continuo' o 'digital'")
+    if modo == "digital" and (not np.isfinite(periodo) or periodo <= 0):
+        raise ValueError("El período digital debe ser positivo y finito")
     inicial = trayectoria.qi if q0 is None else q0
     velocidad = np.zeros(2) if qd0 is None else qd0
 
     def solicitar(t: float, q: np.ndarray, qd: np.ndarray) -> np.ndarray:
-        """Evaluar el torque PD o PD+G solicitado en el tiempo real de RK45."""
+        """Evaluar el torque PD o PD+G con referencia del tiempo recibido."""
         deseada, velocidad_deseada, _ = trayectoria.evaluar(t)
         # La saturación permanece en simular_planta, común a toda instancia.
         return controlador.calcular(q, qd, deseada, velocidad_deseada, dinamica)
 
-    simulacion = simular_planta(
-        dinamica, inicial, velocidad, duracion=trayectoria.duracion + permanencia,
-        paso_salida=paso_salida, rtol=rtol, atol=atol, torque=solicitar, friccion=friccion)
+    duracion = trayectoria.duracion + permanencia
+    tiempos_control = pedido_control = aplicado_control = None
+    if modo == "continuo":
+        # Conservar la misma ruta de integración mantiene las llamadas y
+        # los resultados de los escenarios previamente verificados.
+        simulacion = simular_planta(
+            dinamica, inicial, velocidad, duracion=duracion,
+            paso_salida=paso_salida, rtol=rtol, atol=atol, torque=solicitar, friccion=friccion)
+    else:
+        simulacion, tiempos_control, pedido_control, aplicado_control = _simular_digital(
+            dinamica, inicial, velocidad, duracion, solicitar, friccion,
+            periodo, paso_salida, rtol, atol)
     referencias = np.array([trayectoria.evaluar(t) for t in simulacion.t])
     q_d, qd_d, qdd_d = referencias[:, 0], referencias[:, 1], referencias[:, 2]
     # Evaluar la demanda ideal permite cotejar capacidad, además del torque
@@ -220,15 +336,19 @@ def simular_seguimiento(
         dinamica.inversa(q, v, a) + friccion.torque(v)
         for q, v, a in zip(q_d, qd_d, qdd_d)])
     return ResultadoSeguimiento(simulacion, trayectoria, controlador,
-                               q_d, qd_d, qdd_d, torque_referencia)
+                               q_d, qd_d, qdd_d, torque_referencia, modo=modo,
+                               periodo=periodo if modo == "digital" else None,
+                               tiempos_control=tiempos_control,
+                               torque_control_solicitado=pedido_control,
+                               torque_control_aplicado=aplicado_control)
 
 
 def medir_seguimiento(resultado: ResultadoSeguimiento) -> dict:
     """Calcular errores, demanda y capacidad de selección por eje, sin exportar.
 
-    Los máximos pertenecen a la grilla del resultado. Errores en grados,
-    torques en N·m, velocidad articular en rad/s, entrada de motor/reductor
-    en rpm y potencia mecánica en W. Las estimaciones de motor usan eta
+    Errores, velocidades y potencias pertenecen a la grilla del resultado.
+    Errores en grados, torques en N·m, velocidad articular en rad/s, entrada
+    de motor/reductor en rpm y potencia mecánica en W. Las estimaciones de motor usan eta
     máxima del reductor; no modelan consumo eléctrico, temperatura ni frenado.
     ``cumple_precision`` aplica 2° máximo y 0,2° final a seguimiento nominal;
     la recuperación con error inicial de 5° se evalúa por asentamiento aparte.
@@ -236,6 +356,10 @@ def medir_seguimiento(resultado: ResultadoSeguimiento) -> dict:
     la planta; ``solicitud_sin_saturacion`` informa aparte si todo el pedido
     observado cabe en los límites. No convierte una solicitud saturada en
     una demanda satisfecha. La potencia del motor se estima con eta máxima.
+    En digital, los máximos pedido y aplicado incorporan todos los eventos
+    de control, aun si Ts es menor al paso de salida. Los máximos de estado
+    y potencia, y el porcentaje de saturación, utilizan la grilla de salida;
+    el último cuenta muestras saturadas, no tiempo exacto.
     """
     r = resultado.simulacion
     error = np.rad2deg(np.abs(resultado.error))
@@ -251,8 +375,14 @@ def medir_seguimiento(resultado: ResultadoSeguimiento) -> dict:
         for a in ACTUADORES])
     velocidad = np.abs(r.qd).max(axis=0)
     rpm = velocidad * relaciones * 60 / (2 * np.pi)
-    pedido = np.abs(r.torque_solicitado).max(axis=0)
-    aplicado = np.abs(r.torque_aplicado).max(axis=0)
+    # La traza conserva pedidos entre dos muestras de salida que podrían
+    # quedar sin representar cuando el controlador se actualiza más rápido.
+    pedidos = r.torque_solicitado if resultado.torque_control_solicitado is None else (
+        resultado.torque_control_solicitado)
+    aplicaciones = r.torque_aplicado if resultado.torque_control_aplicado is None else (
+        resultado.torque_control_aplicado)
+    pedido = np.abs(pedidos).max(axis=0)
+    aplicado = np.abs(aplicaciones).max(axis=0)
     ideal = np.abs(resultado.torque_referencia).max(axis=0)
     # Mantener signo de P distingue accionamiento y frenado. La comparación
     # de capacidad usa magnitud, sin atribuir recuperación de energía eléctrica.
