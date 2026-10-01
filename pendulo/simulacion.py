@@ -6,8 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.integrate import solve_ivp
 
+from .control import ControladorPD
 from .dinamica import Dinamica
-from .parametros import LIMITES_TORQUE, Friccion
+from .parametros import ACTUADORES, LIMITES_TORQUE, Friccion
+from .trayectorias import TrayectoriaQuintica
 
 
 @dataclass
@@ -149,3 +151,141 @@ def simular_planta(
     registros = np.array([torques(ti, qi, vi) for ti, qi, vi in zip(solucion.t, q, v)])
     return ResultadoSimulacion(solucion.t.copy(), q, v, cinetica, potencial, solucion.nfev,
                               registros[:, 0], registros[:, 1], registros[:, 2])
+
+
+@dataclass
+class ResultadoSeguimiento:
+    """Movimiento controlado y referencias sobre la misma grilla temporal.
+
+    ``simulacion`` conserva los estados, energías y torques de la planta.
+    q_d, qd_d y qdd_d son arrays (n,2) en rad, rad/s y rad/s². El torque
+    de referencia (n,2), en N·m, es la demanda ideal de esa trayectoria,
+    incluyendo fricción; no se utiliza como anticipación en el controlador.
+    """
+
+    simulacion: ResultadoSimulacion
+    trayectoria: TrayectoriaQuintica
+    controlador: ControladorPD
+    q_d: np.ndarray
+    qd_d: np.ndarray
+    qdd_d: np.ndarray
+    torque_referencia: np.ndarray
+
+    @property
+    def error(self) -> np.ndarray:
+        """Retornar error articular deseado menos real (n,2) en rad."""
+        # Usar los mismos tiempos evita introducir remuestreo en las métricas.
+        return self.q_d - self.simulacion.q
+
+
+def simular_seguimiento(
+    dinamica: Dinamica,
+    trayectoria: TrayectoriaQuintica,
+    controlador: ControladorPD,
+    q0: np.ndarray | None = None,
+    qd0: np.ndarray | None = None,
+    permanencia: float = 1.0,
+    friccion: Friccion = Friccion(),
+    paso_salida: float = 0.001,
+    rtol: float = 1e-7,
+    atol: float = 1e-9,
+) -> ResultadoSeguimiento:
+    """Integrar control continuo durante la quintica y la permanencia final.
+
+    Por defecto parte de qi y reposo. q0/qd0 permiten una perturbación o
+    continuar desde el estado real de un tramo anterior, en rad y rad/s.
+    ``permanencia`` debe ser al menos 1 s. La planta conserva RK45, límites
+    físicos y grilla de salida; el controlador se evalúa en cada llamada
+    interna, sin muestreo digital ni anticipación del torque de referencia.
+    """
+    if permanencia < 1.0:
+        raise ValueError("La permanencia final debe ser de al menos 1 s")
+    inicial = trayectoria.qi if q0 is None else q0
+    velocidad = np.zeros(2) if qd0 is None else qd0
+
+    def solicitar(t: float, q: np.ndarray, qd: np.ndarray) -> np.ndarray:
+        """Evaluar el torque PD o PD+G solicitado en el tiempo real de RK45."""
+        deseada, velocidad_deseada, _ = trayectoria.evaluar(t)
+        # La saturación permanece en simular_planta, común a toda instancia.
+        return controlador.calcular(q, qd, deseada, velocidad_deseada, dinamica)
+
+    simulacion = simular_planta(
+        dinamica, inicial, velocidad, duracion=trayectoria.duracion + permanencia,
+        paso_salida=paso_salida, rtol=rtol, atol=atol, torque=solicitar, friccion=friccion)
+    referencias = np.array([trayectoria.evaluar(t) for t in simulacion.t])
+    q_d, qd_d, qdd_d = referencias[:, 0], referencias[:, 1], referencias[:, 2]
+    # Evaluar la demanda ideal permite cotejar capacidad, además del torque
+    # aplicado limitado. No altera la ley de control ni la integración.
+    torque_referencia = np.array([
+        dinamica.inversa(q, v, a) + friccion.torque(v)
+        for q, v, a in zip(q_d, qd_d, qdd_d)])
+    return ResultadoSeguimiento(simulacion, trayectoria, controlador,
+                               q_d, qd_d, qdd_d, torque_referencia)
+
+
+def medir_seguimiento(resultado: ResultadoSeguimiento) -> dict:
+    """Calcular errores, demanda y capacidad de selección por eje, sin exportar.
+
+    Los máximos pertenecen a la grilla del resultado. Errores en grados,
+    torques en N·m, velocidad articular en rad/s, entrada de motor/reductor
+    en rpm y potencia mecánica en W. Las estimaciones de motor usan eta
+    máxima del reductor; no modelan consumo eléctrico, temperatura ni frenado.
+    ``cumple_precision`` aplica 2° máximo y 0,2° final a seguimiento nominal;
+    la recuperación con error inicial de 5° se evalúa por asentamiento aparte.
+    ``cumple_capacidad`` contrasta la trayectoria ideal y lo entregado por
+    la planta; ``solicitud_sin_saturacion`` informa aparte si todo el pedido
+    observado cabe en los límites. No convierte una solicitud saturada en
+    una demanda satisfecha. La potencia del motor se estima con eta máxima.
+    """
+    r = resultado.simulacion
+    error = np.rad2deg(np.abs(resultado.error))
+    maximo, final = error.max(axis=0), error[-1]
+    relaciones = np.array([a.relacion for a in ACTUADORES])
+    eficiencias = np.array([a.eficiencia_maxima for a in ACTUADORES])
+    limites_rpm = np.array([min(a.velocidad_motor_nominal, a.velocidad_entrada_continua)
+                           for a in ACTUADORES])
+    limites_potencia = np.array([a.potencia_reductor_continua for a in ACTUADORES])
+    limites_motor = np.array([a.torque_motor_nominal for a in ACTUADORES])
+    potencias_nominales_motor = np.array([
+        a.torque_motor_nominal * a.velocidad_motor_nominal * 2 * np.pi / 60
+        for a in ACTUADORES])
+    velocidad = np.abs(r.qd).max(axis=0)
+    rpm = velocidad * relaciones * 60 / (2 * np.pi)
+    pedido = np.abs(r.torque_solicitado).max(axis=0)
+    aplicado = np.abs(r.torque_aplicado).max(axis=0)
+    ideal = np.abs(resultado.torque_referencia).max(axis=0)
+    # Mantener signo de P distingue accionamiento y frenado. La comparación
+    # de capacidad usa magnitud, sin atribuir recuperación de energía eléctrica.
+    potencia = r.torque_aplicado * r.qd
+    potencia_max = np.abs(potencia).max(axis=0)
+    torque_motor = aplicado / (relaciones * eficiencias)
+    # Asentamiento: primer tiempo después del último error mayor que 0,2°.
+    # Su resolución es la de salida y solo certifica el horizonte observado.
+    fuera = np.flatnonzero(np.any(error > 0.2, axis=1))
+    asentamiento = 0.0 if len(fuera) == 0 else (
+        float(r.t[fuera[-1] + 1]) if fuera[-1] < len(r.t) - 1 else None)
+    return {
+        "error_maximo_grados": maximo,
+        "error_final_grados": final,
+        "velocidad_final": r.qd[-1].copy(),
+        "asentamiento": asentamiento,
+        "torque_solicitado_maximo": pedido,
+        "torque_aplicado_maximo": aplicado,
+        "torque_referencia_maximo": ideal,
+        "saturacion_porcentaje": 100 * np.mean(
+            np.abs(r.torque_solicitado) > np.asarray(LIMITES_TORQUE), axis=0),
+        "velocidad_maxima": velocidad,
+        "rpm_maxima": rpm,
+        "potencia_maxima": potencia_max,
+        "potencia_positiva_maxima": np.maximum(0, potencia.max(axis=0)),
+        "potencia_negativa_minima": np.minimum(0, potencia.min(axis=0)),
+        "torque_motor_estimado": torque_motor,
+        "potencia_motor_estimada": potencia_max / eficiencias,
+        "solicitud_sin_saturacion": bool(np.all(pedido <= np.asarray(LIMITES_TORQUE))),
+        "cumple_precision": bool(np.all(maximo <= 2) and np.all(final <= 0.2)),
+        "cumple_capacidad": bool(
+            np.all(ideal <= np.asarray(LIMITES_TORQUE)) and
+            np.all(rpm <= limites_rpm) and np.all(potencia_max <= limites_potencia) and
+            np.all(torque_motor <= limites_motor) and
+            np.all(potencia_max / eficiencias <= potencias_nominales_motor)),
+    }

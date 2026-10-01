@@ -2,9 +2,10 @@
 
 ## Estado
 
-Están completadas las **etapas 1 a 5: entorno, modelo mecánico, cinemática,
-dinámica propia, integración, gráficos, animación, actuadores y rozamiento**. Las etapas
-siguientes requieren autorización por separado. El robot auxiliar del diagnóstico
+Están completadas las **etapas 1 a 6: entorno, modelo mecánico, cinemática,
+dinámica propia, integración, gráficos, animación, actuadores, rozamiento,
+trayectorias y control continuo**. La etapa 7 requiere autorización por separado.
+El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
 ## Ejecución
@@ -21,6 +22,10 @@ python3.12 -m venv .venv
 .venv/bin/python main.py --modelo actuado --friccion 0
 .venv/bin/python main.py --modelo actuado --friccion 0.5 --sin-graficos
 .venv/bin/python main.py --caso colgante --sin-graficos
+.venv/bin/python main.py --control comparar --escenario abajo_arriba
+.venv/bin/python main.py --control comparar --escenario ida_vuelta
+.venv/bin/python main.py --control pd_gravedad --escenario estabilizacion
+.venv/bin/python main.py --control comparar --escenario extremos_opuestos --sin-graficos
 .venv/bin/python -m pytest -v
 ```
 
@@ -33,7 +38,16 @@ recupera las barras ideales de las etapas anteriores. `--friccion` elige escala
 `--sin-graficos` omite las figuras y la espera de ventanas.
 No exporta datos, gráficos ni videos. En el IDE debe seleccionarse
 `.venv/bin/python` como intérprete. Para terminar la ejecución gráfica, cerrar
-ambas ventanas.
+todas las ventanas.
+
+`--control` permite `libre` (por defecto), `pd`, `pd_gravedad` o `comparar`.
+En control continuo, `--escenario` selecciona `abajo_arriba`, `arriba_abajo`,
+`extremos`, `extremos_opuestos`, `eje1`, `eje2`, `nulo_horizontal`,
+`estabilizacion` o `ida_vuelta`. Los gráficos comparan las instancias calculadas;
+la animación reproduce PD+G cuando está disponible y PD en caso contrario.
+La ida-vuelta conserva el estado físico entre tramos y crea una figura de
+comparación y una animación por tramo. La reproducción simultánea de varias
+instancias y el control digital quedan para la etapa 7.
 
 La ventana de animación incluye **«Volver a reproducir»**. Se puede pulsar
 durante el movimiento o al terminar para reiniciar desde t=0, usando los
@@ -731,13 +745,242 @@ un recorte de velocidad o potencia que altere la planta. Las pruebas aportan
 evidencia numérica para este modelo y estos horizontes, no una certificación
 de los componentes físicos ni de todos los estados posibles.
 
-La etapa 5 queda completada. La **demanda durante seguimiento, la recuperación
-del invertido y la precisión de PD/PD con gravedad se verificarán en la etapa 6**,
-que requiere autorización separada. Allí se compararán los torques registrados,
-velocidades y potencias efectivas con estas capacidades; cualquier incumplimiento
-motivará un análisis y una propuesta antes de cambiar ganancias o componentes.
+La etapa 5 quedó completada con la reserva estática indicada. El contraste de
+demanda durante seguimiento, recuperación y precisión se documenta a continuación.
+Se conservan los mismos componentes, ganancias aprobadas y límites físicos.
 
-## Diseño aprobado para las siguientes etapas
+## Trayectorias y control continuo: etapa 6
+
+### Referencias y organización
+
+`pendulo/trayectorias.py` contiene `TrayectoriaQuintica(qi,qf)`. Copia dos
+vectores articulares de forma `(2,)` en rad dentro de `[-π,π]`, conserva el
+desplazamiento literal y sincroniza ambos ejes con una duración común. Para
+`0<t<T`, con `s=t/T` y `Δq=qf−qi`:
+
+\[
+q_d=q_i+\Delta q(10s^3-15s^4+6s^5),
+\]
+\[
+\dot q_d=\frac{\Delta q}{T}(30s^2-60s^3+30s^4),\qquad
+\ddot q_d=\frac{\Delta q}{T^2}(60s-180s^2+120s^3).
+\]
+
+Antes del inicio se mantiene qi; desde T se mantiene qf. Posición en los
+extremos y derivadas nulas se asignan explícitamente. `evaluar(t)` entrega
+`(q_d,qd_d,qdd_d)` en rad, rad/s y rad/s², sin modificar los destinos.
+
+Para `d=max(abs(Δq))`, la duración mínima se obtiene de los máximos analíticos
+`max(h')=15/8` y `max(abs(h''))=10√3/3`:
+
+\[
+T=\max\left(2,\frac{(15/8)d}{3},
+\sqrt{\frac{(10\sqrt3/3)d}{6}}\right)\ \mathrm{s}.
+\]
+
+La velocidad alcanza su máximo en `s=1/2`; la aceleración en
+`s=(3±√3)/6`. Un desplazamiento de π rad dura 2 s; uno de 2π rad dura
+`5π/4=3.92699081699 s`. El movimiento nulo mantiene los 2 s mínimos.
+Con estos límites, la aceleración máxima sobre amplitudes entre 0 y 2π
+es `8√3/3=4.61880215352 rad/s²`, en d=3.2 rad; el límite de 6 rad/s²
+no llega a determinar T en este rango. La fórmula conserva las tres condiciones.
+
+`pendulo/control.py` contiene `ControladorPD(nombre,kp,kd,gravedad)`.
+Cada instancia copia sus ganancias, representadas como diagonales `(2,)`:
+`kp=(20,5) N·m/rad`, `kd=(1.3,0.2) N·m·s/rad`. La ley solicitada es
+
+\[
+\tau_{PD}=K_p(q_d-q)+K_d(\dot q_d-\dot q),\qquad
+\tau_{PD+G}=\tau_{PD}+G(q).
+\]
+
+G se evalúa en el estado **real**, sin anticipación de aceleración ni integral.
+La saturación permanece en la planta, común a todas las instancias. Los errores
+no se envuelven y los estados no se recortan.
+
+`simular_seguimiento` reutiliza `simular_planta`: evalúa el controlador dentro
+de RK45, con `rtol=1e-7`, `atol=1e-9` y salida común cada 1 ms. Esta grilla
+es de **registro**, no de actualización digital. Simula T más una permanencia
+final de al menos 1 s. Permite q0/qd0 distintos de la referencia para recuperación
+o continuidad entre tramos. `ResultadoSeguimiento` conserva la simulación, la
+trayectoria, el controlador y referencias sobre sus mismos tiempos. Registra
+además `torque_referencia=M(q_d)qdd_d+C(q_d,qd_d)qd_d+G(q_d)+f(qd_d)`:
+es demanda ideal para diagnóstico y no se suministra al controlador.
+
+`medir_seguimiento` calcula máximos sobre las muestras registradas: error máximo
+y final en grados, velocidades finales, torque pedido/aplicado/ideal, porcentaje
+de muestras saturadas, velocidad real, rpm de entrada y potencia mecánica
+`P=τaplicado·qd`. Conserva máximos positivos y mínimos negativos para distinguir
+accionamiento y frenado, sin atribuir regeneración eléctrica. Estima torque y
+potencia de motor con η máxima, como en etapa 5.
+
+`cumple_precision` exige máximo ≤2° por eje y final ≤0.2°;
+`cumple_capacidad` compara la trayectoria ideal y el torque efectivamente
+entregado con capacidades de selección, rpm y potencias. Un pedido saturado
+puede recuperar la posición aunque no se entregue entero: el indicador separado
+`solicitud_sin_saturacion` permite reconocerlo. El seguimiento nominal exige
+también que la solicitud completa quepa en los límites.
+
+`graficar_seguimientos` crea seis paneles: columnas por articulación y filas
+de posición real/deseada, error en grados y torque pedido/aplicado. Usa un color
+por controlador, referencia negra común y guías de ±2° (±0.2° en recuperación)
+y ±los límites de torque. Usa resultados calculados sin reintegrar ni exportar.
+La animación existente usa esos estados y conserva «Volver a reproducir».
+
+### Escenarios y resultados nominales
+
+Todos los resultados siguientes usan el **modelo actuado, fricción nominal,
+ganancias comunes aprobadas y 1 s de permanencia**. Cada movimiento aislado
+parte de qi en reposo. La vuelta continuada parte de q/qd reales al terminar
+la ida. La derivación dinámica se reutiliza para las comparaciones.
+
+| Escenario | qi → qf [rad] | T [s] |
+|---|---|---:|
+| abajo_arriba | (−π/2,0) → (π/2,0) | 2 |
+| arriba_abajo | (π/2,0) → (−π/2,0) | 2 |
+| extremos | (−π,−π) → (π,π) | 3.92699081699 |
+| extremos_opuestos | (−π,π) → (π,−π) | 3.92699081699 |
+| eje1 | (−π/2,π/3) → (π/2,π/3) | 2 |
+| eje2 | (0,−π) → (0,π) | 3.92699081699 |
+| nulo_horizontal | (0,0) → (0,0) | 2 |
+| vuelta_continuada | referencia arriba_abajo, estado inicial real de abajo_arriba | 2 |
+
+Los errores son magnitudes por eje `(e1,e2)`, incluyen movimiento y permanencia,
+y se calculan sin envolver ángulos. Los valores de las tablas están redondeados;
+las pruebas utilizan los resultados completos.
+
+| Escenario | PD máximo [°] | PD final [°] | PD+G máximo [°] | PD+G final [°] | Precisión PD / PD+G |
+|---|---|---|---|---|---|
+| abajo_arriba | (2.264081,1.145396) | (0.000101,0.000715) | (0.446448,0.159042) | (0.000152,0.001434) | Incumplida / Cumplida |
+| arriba_abajo | (1.757812,1.145694) | (0.000145,0.001515) | (0.446448,0.159042) | (0.000152,0.001434) | Cumplida / Cumplida |
+| extremos | (2.264191,1.500329) | (1.415429,1.215319) | (0.443520,0.389128) | (0.000471,0.001251) | Incumplida / Cumplida |
+| extremos_opuestos | (2.262084,1.212922) | (1.415453,1.212922) | (0.343191,0.452205) | (0.000447,0.001145) | Incumplida / Cumplida |
+| eje1 | (2.164522,1.360111) | (0.274544,1.065663) | (0.420049,0.202815) | (0.000066,0.000840) | Incumplida / Cumplida |
+| eje2 | (1.991827,1.495613) | (1.415937,1.212867) | (0.043816,0.297567) | (0.000016,0.001199) | Incumplida / Cumplida |
+| nulo_horizontal | (2.021903,1.212142) | (2.021903,1.212141) | (0,0) | (0,0) | Incumplida / Cumplida |
+| vuelta_continuada | (1.757812,1.145694) | (0.000145,0.001515) | (0.446447,0.159042) | (0.000152,0.001434) | Cumplida / Cumplida |
+
+El PD puro se evalúa como comparación, sin exigirle la aceptación del PD+G.
+En horizontal desarrolla el error necesario para sostener el peso: `Kp·e≈G(q)`.
+PD+G conserva exactamente el horizontal nulo en esta integración con medición
+y modelo ideales. Mover un solo eje de referencia deja una desviación pequeña
+en el otro eje real por acoplamiento; el controlador la corrige.
+
+### Demanda y capacidad de los actuadores
+
+Se contrasta la **demanda ideal y la solicitud**, además del torque aplicado
+limitado. En los ocho movimientos PD+G no hubo muestras saturadas y el pedido
+coincide con lo aplicado. Potencias y rpm usan velocidades reales.
+
+| Escenario PD+G | Pedido máximo [N·m] | Ideal máximo [N·m] | Velocidad real máxima [rad/s] | Máximo abs(P) [W] |
+|---|---|---|---|---|
+| abajo_arriba | (0.800254,0.112339) | (0.800067,0.106929) | (2.956660,0.009554) | (2.361386,0.000772) |
+| arriba_abajo | (0.622518,0.100886) | (0.622646,0.106929) | (2.956660,0.009554) | (1.835872,0.000737) |
+| extremos | (0.800121,0.131154) | (0.799728,0.131173) | (3.011797,2.991821) | (2.408741,0.392355) |
+| extremos_opuestos | (0.797695,0.105948) | (0.797480,0.105967) | (3.005270,2.987370) | (2.396783,0.275659) |
+| eje1 | (0.763162,0.120601) | (0.762666,0.124300) | (2.955412,0.008788) | (2.235313,0.000605) |
+| eje2 | (0.714157,0.130989) | (0.708799,0.130964) | (0.002748,3.001004) | (0.001902,0.393093) |
+| nulo_horizontal | (0.706320,0.105948) | (0.706320,0.105948) | (0,0) | (0,0) |
+| vuelta_continuada | (0.622518,0.100885) | (0.622646,0.106929) | (2.956660,0.009554) | (1.835872,0.000737) |
+
+Los máximos conjuntos de pedido son `(0.800254,0.131154) N·m`, frente a
+`(1.20,0.31) N·m`: reserva aproximada `(0.399746,0.178846) N·m` en estos
+recorridos. La demanda ideal máxima también cabe: `(0.800067,0.131173) N·m`.
+Entrada real máxima `(1783.154,745.094) rpm`, frente a límites de selección
+`(10800,10000) rpm`. Potencia de salida máxima absoluta
+`(2.408741,0.393093) W`, frente a `(6,12) W` de transmisión.
+
+Con η máxima, el torque máximo estimado de motor es aproximadamente
+`(0.017443,0.006228) N·m`, frente a `(0.0322,0.0149) N·m`; su potencia
+mecánica estimada máxima es `(3.2551,0.4853) W`, frente a
+`(36.4173,16.8515) W` del punto nominal. Son contrastes de selección,
+no una envolvente real de funcionamiento ni un modelo de pérdidas en frenado.
+
+La velocidad de la **referencia** respeta 3 rad/s. El estado real llega a
+`3.011797 rad/s` en el eje 1 y `3.001004 rad/s` en el eje 2, por la respuesta
+del control, y conserva esos valores sin recorte. Cabe en las capacidades
+físicas usadas en la selección. No se cambió T para ocultar esas diferencias.
+
+### Recuperación del invertido
+
+Referencia nula en `(π/2,0)`, q0 con las cuatro combinaciones de ±5°,
+qd0=(0,0), horizonte 3 s, salida de 1 ms. Se mide el primer instante después
+del último error superior a 0.2° en cualquier eje; luego ambos permanecen
+dentro de ese umbral en las muestras restantes. La resolución es 1 ms y
+la afirmación se limita al horizonte observado. Los 5° iniciales no se
+comparan contra el criterio máximo de 2° del seguimiento.
+
+| Perturbación [°] | Asentamiento PD / PD+G [s] | Final PD+G [°] | Pedido máximo PD+G [N·m] | Muestras saturadas PD+G [%] |
+|---|---|---|---|---|
+| (+5,+5) | 0.188 / 0.176 | (2.111e-7,8.768e-7) | (1.816053,0.454730) | (0.399867,0.299900) |
+| (+5,−5) | 0.218 / 0.218 | (2.587e-7,1.444e-6) | (1.797655,0.436332) | (0.133289,0.066644) |
+| (−5,+5) | 0.218 / 0.218 | (2.587e-7,1.444e-6) | (1.797655,0.436332) | (0.133289,0.066644) |
+| (−5,−5) | 0.188 / 0.176 | (2.111e-7,8.768e-7) | (1.816053,0.454730) | (0.399867,0.299900) |
+
+La recuperación se cumple con ambos controladores. La solicitud inicial
+supera los límites y el aplicado queda en `(1.20,0.31) N·m` como máximos
+absolutos, sin recurrir a torque intermitente ni recorte de estados. El porcentaje
+es de **muestras**, no una medición exacta de duración de saturación. La planta
+entrega un torque menor que el pedido en esas muestras: se informa explícitamente.
+
+### Informe de verificaciones
+
+Reproducción de las verificaciones de etapa 6 y de la suite completa:
+
+```bash
+.venv/bin/python -m pytest tests/test_trayectorias.py tests/test_control.py tests/test_seguimiento.py tests/test_graficos_control.py tests/test_cli_control.py -v -s
+.venv/bin/python -m pytest -v -s
+```
+
+La suite completa aprobó **98 casos** en 53.81 s: 49 nuevos y los 49 previos.
+La revisión de los 21 archivos Python comprobó docstrings y comentarios internos
+en las 123 funciones/métodos propios. El diff pasó la revisión de whitespace.
+
+| Prueba y propósito | Método y condiciones | Resultado esperado | Resultado obtenido | Estado | Análisis preliminar |
+|---|---|---|---|---|---|
+| Extremos, reposo y T | Tres trayectorias cortas/π/2π; tiempos antes, en extremos y después de T | Destinos exactos, derivadas cero y T conocido a 1e-14 s | Destinos/derivadas exactos; T=2,2,3.92699081699 s | Cumplida | El giro entre −π y π recorre 2π literalmente. |
+| Derivadas y continuidad | 19 tiempos de qi=(−2,1), qf=(2.5,−2); diferencias centrales h=1e-5 s; interiores a 1e-7 s de extremos | Derivadas a 1e-9 en SI; continuidad q/v/a a 1e-12/1e-12/1e-5 en SI | Diferencias máximas 5.0591e-10 rad/s y 4.6551e-10 rad/s²; extremos cumplen | Cumplida | Contraste numérico independiente de las derivadas analíticas. |
+| Límites, sincronización y minimalidad | 102 amplitudes hasta 2π, incluyendo 3.2 rad; 501 tiempos por amplitud y picos analíticos | T≥2 s, vmax≤3, amax≤6; progreso común; límite activo si T>2 | vmax=3 rad/s, amax=4.61880215352 rad/s²; concordancia a 1e-12 | Cumplida | La aceleración no es la restricción activa para los límites aprobados. |
+| Movimiento nulo y eje fijo | Destinos iguales y giro de un solo eje; modificar copias de entradas y salidas | Posición fija y derivadas cero exactas; destinos intactos | Todas las igualdades se cumplen | Cumplida | La referencia nula no impide que PD puro derive físicamente por gravedad. |
+| Formato y rango de referencias | Siete entradas con forma/rango/valores inválidos | ValueError sin envolver ni recortar destinos | Siete rechazos explícitos | Cumplida | El control de referencias no impone topes sobre el estado real. |
+| Leyes de control y G real | Estado y ganancias conocidos; gravedad auxiliar distinta de la deseada | PD=(1.4,1.42), PD+G=(1.85,0.32) N·m a 1e-12; entradas intactas | Valores esperados; usa q real para G | Cumplida | La ley implementada coincide con las ecuaciones aprobadas. |
+| Instancias y ganancias | Dos controladores desde arrays compartidos; modificación independiente; entradas de ganancias inválidas | Nombres/configuraciones independientes; Kp positiva y Kd no negativa; errores literales | Copias independientes, siete rechazos y Kd=0 admitida; error de 2π sin envolver | Cumplida | Permite comparaciones sin compartir ganancias accidentalmente. |
+| Seguimiento nominal y demanda | Ocho recorridos de las tablas; PD y PD+G con condiciones idénticas | PD+G máximo≤2°, final≤0.2°, pedido e ideal dentro de límites y capacidad de rpm/potencia | Máximo conjunto (0.446448,0.452205)°, final conjunto (0.000471,0.001434)°; tablas de demanda; sin saturación nominal | Cumplida | PD+G cumple en los casos observados; PD puro tiene incumplimientos diagnósticos indicados. |
+| Recuperación de 5° | Cuatro perturbaciones con ambos ejes en reposo; referencia invertida nula | Final≤0.2° y permanencia dentro del umbral tras asentarse; aplicado dentro de límites | PD+G asienta en 0.176–0.218 s; final≤1.444e-6°; saturación explícita | Cumplida | No se aplica el máximo de seguimiento al error inicial de recuperación. |
+| Sesgo del PD puro y sostén con G | Horizontal nulo durante 3 s; contraste Kp·e frente a G(qfinal) | PD desarrolla sesgo; equilibrio a 1e-4 N·m; PD+G q/qd nulos a 1e-12 en SI | PD final (2.021903,1.212141)°; equilibrio dentro de tolerancia; PD+G permanece nulo | Cumplida | La compensación de gravedad elimina el sesgo en este modelo ideal. |
+| Referencias, registros y continuidad | Todas las simulaciones; evaluar fórmula de torque y geometría de G independientes; conservar final real en vuelta | Referencia/estado misma grilla, t final=T+1; hold exacto; pedido a 1e-12 N·m, clipping exacto; continuidad q/qd exacta | Todas las condiciones se cumplen | Cumplida | No hay reinicio artificial en el regreso ni compensación oculta. |
+| Control dentro de RK45 | Interceptar calcular sin alterar su resultado en recuperación (+5,−5)° | Llamadas=nfev+muestras de registro, más que muestras de salida | Igualdad cumplida | Cumplida | La salida de 1 ms no implementa retención de control digital. |
+| Convergencia del control | Extremos opuestos PD+G, repetir con rtol=1e-9/atol=1e-11 y misma salida | Δq≤1e-5 rad, Δqd≤1e-4 rad/s, Δτpedido≤1e-4 N·m; conservar aceptación | Δq=1.6482e-9 rad, Δqd=3.1943e-7 rad/s, Δτ=9.2882e-8 N·m; 6842/15590 evaluaciones | Cumplida | Diferencias muy menores que los errores físicos de seguimiento; referencia estricta no es solución exacta. |
+| Datos y renderizado de gráficos | Resultados sintéticos con tiempos/señales conocidos; seis paneles en Agg; bloquear integrador, show y exportaciones | Curvas exactas, errores en grados a 1e-12, colores comunes, referencia única, guías y datos intactos | Cinco casos gráficos cumplen; figuras renderizadas sin integración ni mutaciones | Cumplida | Los gráficos representan la salida, incluyendo solicitudes fuera de límites. |
+| Ejecución y coordinación ida-vuelta | Subproceso con --control comparar --escenario ida_vuelta --sin-graficos; coordinación con resultados auxiliares distintos | Código 0, dos tramos y ambos controles; PD+G aceptado; herencia de q/qd reales | Código 0; cuatro informes, ambos PD+G aceptados; herencia exacta; llamadas de gráficos/exportación bloqueadas sin invocaciones | Cumplida | La coordinación conserva condiciones comunes y el estado real propio de cada instancia. |
+| Inspección gráfica | Extremos opuestos y recuperación nominal; render de seis paneles en memoria | Etiquetas, guías y leyendas legibles; distinguir errores y saturación | Figuras inspeccionadas sin recortes ni superposición de etiquetas; saturación visible | Cumplida | Los datos permanecen en memoria; no se exportan figuras ni videos. |
+| Ventanas y animación controlada | TkAgg; abajo–arriba PD+G de 3 s; pulsación real del botón durante/después; fotogramas en 0,1.5,3 s frente a Toolbox | Ventanas operativas; geometría a 1e-12 m y tiempo exacto; timer llega al final; reinicios a t=0; sin reintegración/mutaciones | Seis paneles y animación abiertos; timer termina en 3.000 s; reinicios y geometrías correctos; arrays intactos | Cumplida | La animación y su botón funcionan también con los estados controlados. |
+| Regresión y documentación | Suite completa, revisión de docstrings/comentarios y diff | Preservar etapas previas; funciones propias documentadas; diff limpio | 98 casos aprobados; 123 funciones/métodos documentados en 21 archivos; diff limpio | Cumplida | Las incorporaciones conservan las verificaciones anteriores. |
+
+### Análisis conjunto y continuidad
+
+Las quinticas y las ganancias aprobadas permiten cumplir la precisión nominal
+del PD+G continuo en los recorridos indicados, con la fricción y actuadores
+de etapa 5. No fue necesario modificar ganancias, duración mínima, límites,
+montaje ni candidatos. El sesgo del PD puro coincide con la ausencia de
+compensación de gravedad; no se cambió su ley para hacerlo cumplir.
+
+La recuperación tolera pedidos iniciales superiores al torque disponible
+mediante la saturación física acordada. La demanda nominal cabe con reserva
+en los límites de torque, rpm y potencia de selección. Las velocidades reales
+ligeramente superiores a la referencia se conservan y se distinguen del límite
+de diseño de la trayectoria.
+
+Los errores y las reservas son evidencia numérica sobre estos casos y tiempos,
+no garantías para todos los estados ni precisión de una construcción real.
+Se mantienen fricción supuesta, eficiencia máxima, medición ideal y ausencia
+de electrónica, juego, elasticidad y efectos térmicos. Las estimaciones de motor
+en frenado no validan pérdidas ni regeneración. El control digital de 1 ms,
+la sensibilidad a otros períodos y fricciones, más pares reproducibles y la
+animación simultánea se implementarán en la etapa 7 tras autorización.
+La etapa 6 queda completada con los resultados y limitaciones anteriores.
+
+## Diseño aprobado del proyecto
 
 - Dos articulaciones actuadas en el plano XY vertical; q1 se mide desde +X y q2
   respecto del primer eslabón. Invertido: `(π/2,0)`. Rango de destinos: `[-π,π]`,
@@ -752,7 +995,7 @@ motivará un análisis y una propuesta antes de cambiar ganancias o componentes.
   `20 g`; composición de inercias y centros de masa por Steiner.
 - Candidatos de 18 V: DCX 22 L + GPX 22 estándar ≈62:1 para el eje 1 y DCX 22 S
   + GPX 22 estándar ≈26:1 para el eje 2. Límites continuos iniciales: `1.20 N·m`
-  y aproximadamente `0.31 N·m`, pendientes de verificar demanda. Añadir `N²Jm`
+  y aproximadamente `0.31 N·m`, contrastados en seguimiento continuo. Añadir `N²Jm`
   a la diagonal de M sin duplicar el efecto.
 - Fricción articular `B·q̇ + Tc·tanh(q̇/ε)`, con `B=(0.02,0.005) N·m·s/rad`,
   `Tc=(0.03,0.01) N·m` y `ε=0.01 rad/s`. Son supuestos de pérdidas moderadas:
@@ -798,8 +1041,8 @@ proyecto y se actualizará y publicará su referencia como submódulo en el
 repositorio padre. Los commits incluirán únicamente los cambios de la etapa.
 
 Los módulos de parámetros, modelo, dinámica, trayectorias, control, simulación y
-visualización se crearán cuando tengan una implementación concreta. No se generan
-módulos vacíos por adelantado. Control cartesiano, fuerzas, adaptación y material
+visualización contienen implementaciones concretas. No se generan módulos vacíos
+por adelantado. Control cartesiano, fuerzas, adaptación y material
 de presentación quedan fuera de la primera versión.
 
 ## Fuentes

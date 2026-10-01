@@ -9,7 +9,8 @@ from matplotlib.text import Text
 from matplotlib.widgets import Button
 
 from .modelo import posiciones_geometricas
-from .simulacion import ResultadoSimulacion
+from .parametros import LIMITES_TORQUE
+from .simulacion import ResultadoSeguimiento, ResultadoSimulacion
 
 
 def graficar_resultado(resultado: ResultadoSimulacion, nombre: str = "Movimiento libre") -> Figure:
@@ -38,6 +39,75 @@ def graficar_resultado(resultado: ResultadoSimulacion, nombre: str = "Movimiento
     for eje in ejes:
         eje.grid(True, alpha=0.3)
         eje.legend(loc="upper right")
+    figura.tight_layout()
+    return figura
+
+
+def graficar_seguimientos(
+    resultados: dict[str, ResultadoSeguimiento],
+    nombre: str = "Control continuo",
+    limite_error: float = 2.0,
+) -> Figure:
+    """Crear comparación 3×2 de posiciones, errores y torques ya calculados.
+
+    Cada columna corresponde a una articulación. Las filas muestran q real
+    y deseada en rad, error deseado menos real en grados y torque solicitado
+    y aplicado en N·m. Usa los tiempos originales de cada resultado, sin
+    remuestreo. Los resultados deben corresponder a una referencia común,
+    dibujada una sola vez desde el primero. ``limite_error`` se expresa en
+    grados: 2 para seguimiento nominal o 0,2 para observar recuperación.
+    Devuelve una figura sin mostrarla, exportarla ni reintegrar los estados.
+    """
+    if not resultados:
+        raise ValueError("La comparación debe incluir al menos un resultado.")
+    if not np.isfinite(limite_error) or limite_error <= 0:
+        raise ValueError("El límite de error debe ser positivo y finito.")
+    figura, ejes = plt.subplots(3, 2, sharex=True, figsize=(11, 9))
+    figura.suptitle(nombre)
+    primero = next(iter(resultados.values()))
+    colores = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for articulacion in range(2):
+        # Una referencia negra común evita repetir curvas idénticas y permite
+        # distinguir los resultados reales de cada instancia del controlador.
+        ejes[0, articulacion].plot(
+            primero.simulacion.t, primero.q_d[:, articulacion],
+            color="black", linestyle="--", label="Referencia")
+        ejes[0, articulacion].set_title(f"Articulación {articulacion + 1}")
+        ejes[0, articulacion].set_ylabel("Ángulo [rad]")
+        ejes[1, articulacion].set_ylabel("Error [°]")
+        ejes[2, articulacion].set_ylabel("Torque [N·m]")
+        ejes[2, articulacion].set_xlabel("Tiempo [s]")
+        # Las guías horizontales representan criterios y límites físicos;
+        # no recortan señales que excedan esas magnitudes.
+        ejes[1, articulacion].axhline(
+            limite_error, color="gray", linestyle=":", label=f"±{limite_error:g}°")
+        ejes[1, articulacion].axhline(-limite_error, color="gray", linestyle=":")
+        ejes[2, articulacion].axhline(
+            LIMITES_TORQUE[articulacion], color="gray", linestyle=":", label="Límite físico")
+        ejes[2, articulacion].axhline(
+            -LIMITES_TORQUE[articulacion], color="gray", linestyle=":")
+    for indice, (identificador, resultado) in enumerate(resultados.items()):
+        r = resultado.simulacion
+        color = colores[indice % len(colores)]
+        error_grados = np.rad2deg(resultado.error)
+        for articulacion in range(2):
+            # El mismo color sigue al controlador en estados, error y ambos
+            # torques. La línea discontinua identifica el torque aplicado.
+            ejes[0, articulacion].plot(
+                r.t, r.q[:, articulacion], color=color, label=identificador)
+            ejes[1, articulacion].plot(
+                r.t, error_grados[:, articulacion], color=color, label=identificador)
+            ejes[2, articulacion].plot(
+                r.t, r.torque_solicitado[:, articulacion], color=color,
+                label=f"{identificador}: solicitado")
+            ejes[2, articulacion].plot(
+                r.t, r.torque_aplicado[:, articulacion], color=color, linestyle="--",
+                label=f"{identificador}: aplicado")
+    # Mostrar unidades, grilla y leyendas en cada panel mantiene legibles las
+    # comparaciones aun cuando las señales de dos controladores se aproximen.
+    for eje in ejes.flat:
+        eje.grid(True, alpha=0.3)
+        eje.legend(loc="best")
     figura.tight_layout()
     return figura
 
