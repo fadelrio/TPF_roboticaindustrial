@@ -9,6 +9,13 @@ La primera versión acordada queda implementada.
 El robot auxiliar del diagnóstico
 no es el modelo mecánico del proyecto.
 
+## Guía de uso
+
+La [guía de uso](GUIA_USO.md) reúne preparación del entorno y PyCharm,
+todos los argumentos de consola, escenarios, ejemplos, lectura de métricas,
+gráficos y reproducción, y referencia de las funciones públicas de Python.
+Incluye las comprobaciones realizadas para esta entrega documental.
+
 ## Ejecución
 
 Se utiliza Python 3.12 y una `.venv` dentro de esta carpeta. Para reproducir el
